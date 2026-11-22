@@ -121,6 +121,15 @@ export const STRINGS = {
   tripWeatherRetry: { en: "Try again", zh: "重新加载" },
   tripWeatherPreviousDays: { en: "Previous forecast days", zh: "上一组天气" },
   tripWeatherNextDays: { en: "Next forecast days", zh: "下一组天气" },
+  tripWeatherTypical: { en: "Typical", zh: "往年同期" },
+  tripWeatherTypicalHint: {
+    en: "Typical days are averages for these dates over the last 3 years, not a forecast.",
+    zh: "“往年同期”是近 3 年同日期的平均天气，不是预报。",
+  },
+  tripWeatherChangesTitle: {
+    en: "The forecast has changed since your outfits were planned",
+    zh: "穿搭规划后天气预报有变化",
+  },
   checklist: { en: "Checklist", zh: "物品清单" },
   todaysOutfit: { en: "Today's Outfit", zh: "今日穿搭" },
   outfitOverviewTitle: { en: "Trip Outfit Overview", zh: "行程穿搭总览" },
@@ -376,6 +385,14 @@ export const STRINGS = {
   photoSource: { en: "Photos", zh: "图片来源" },
   continueToItinerary: { en: "Plan this trip", zh: "规划这趟行程" },
   continueToSetup: { en: "Set destination & dates", zh: "选目的地和日期" },
+
+  // session restore when the backend cannot be reached
+  unreachableTitle: { en: "Can't reach WearRoute", zh: "暂时连不上 WearRoute" },
+  unreachableBody: {
+    en: "You're still signed in. Check your connection — the server may also be waking up, which can take up to a minute.",
+    zh: "你的登录状态仍然保留。请检查网络；服务器也可能正在启动，最多需要一分钟。",
+  },
+  unreachableRetry: { en: "Try again", zh: "重试" },
 } as const;
 
 export type StringKey = keyof typeof STRINGS;

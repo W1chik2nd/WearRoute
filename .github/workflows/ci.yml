@@ -1,0 +1,51 @@
+# Runs the same checks as `npm test` / `npm run build` and the iOS build on
+# every push to main and every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web-and-api:
+    runs-on: ubuntu-latest
+    # Production runs on PostgreSQL; postgres-app.test.ts exercises that path.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wearroute
+          POSTGRES_PASSWORD: wearroute
+          POSTGRES_DB: wearroute_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wearroute"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://wearroute:wearroute@localhost:5432/wearroute_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Server tests (offline: fetch to third-party hosts is blocked), client
+      # tests, the render check and the headless-Chrome layout probe.
+      - run: npm test
+      - run: npm run build
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The app uses iOS 26 APIs behind #available, so it needs the newest SDK.
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Build app and unit tests
+        run: >
+          xcodebuild -project ios/SmartPack.xcodeproj -scheme SmartPack
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build-for-testing

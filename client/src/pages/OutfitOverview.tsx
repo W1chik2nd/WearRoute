@@ -12,6 +12,7 @@ import { useLang } from "../i18n/useLang";
 import OutfitPieceVisual from "../components/OutfitPieceVisual";
 import { useLocalizedValues } from "../hooks/useLocalizedValues";
 import { useTranslatedText } from "../hooks/useTranslatedText";
+import { localIsoDate } from "../lib/local-date";
 
 type Props = { onBack: () => void; tripPlanId?: string };
 
@@ -50,7 +51,7 @@ export default function OutfitOverview({ onBack, tripPlanId }: Props) {
     setWx(null);
     setWxError(false);
     setActiveIndex(0);
-    getOutfitPlan(tripPlanId)
+    getOutfitPlan(tripPlanId, localIsoDate())
       .then(({ plan: next }) => {
         setPlan(next);
         weather(next.lat, next.lon).then(setWx).catch(() => setWxError(true));

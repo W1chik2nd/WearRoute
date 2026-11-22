@@ -1,4 +1,5 @@
 import type { StopKind } from "./itinerary.ts";
+import type { TripForecast } from "../shared/weather-types.ts";
 
 export type OutfitItemKind = "top" | "bottom" | "shoes" | "accessory";
 
@@ -68,4 +69,9 @@ export type GeneratedTripPlan = {
   departLabel: string;
   days: GeneratedTripDay[];
   packing: GeneratedPacking;
+  /**
+   * Added by the server, not the model: the forecast the plan was made
+   * against, kept so later forecast changes can be pointed out.
+   */
+  weatherSnapshot?: TripForecast;
 };

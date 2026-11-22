@@ -15,6 +15,9 @@ type Ctx = {
   userFromHeader: () => AsyncValue<{ id: string } | null>;
 };
 
+/** How long a "no photo for this stop" answer is reused before trying again. */
+const MISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** 处理了就返回 true,让 app.ts 知道不用继续匹配后面的路由。 */
 export async function handleItineraryRoutes(ctx: Ctx): Promise<boolean> {
   const { req, res, url, itinerary, json, userFromHeader } = ctx;
@@ -68,6 +71,12 @@ export async function handleItineraryRoutes(ctx: Ctx): Promise<boolean> {
       json(res, 404, { error: "停靠点不存在。" });
       return true;
     }
+    // A recent lookup found nothing: answer from that instead of spending up
+    // to four library requests again on every page view.
+    if (!stop.photoUrl && stop.photoMissingAt && Date.now() - stop.photoMissingAt < MISS_TTL_MS) {
+      json(res, 200, { photo: null, cached: true });
+      return true;
+    }
     // 已经查过就直接给,省一次外部请求。
     if (stop.photoUrl) {
       json(res, 200, {
@@ -92,6 +101,7 @@ export async function handleItineraryRoutes(ctx: Ctx): Promise<boolean> {
         photoQuery: stop.photoQuery,
       });
       if (!found) {
+        await itinerary.markStopPhotoMissing(user.id, stopId, Date.now());
         json(res, 200, { photo: null });
         return true;
       }

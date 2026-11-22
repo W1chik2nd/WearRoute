@@ -9,6 +9,11 @@
 import { type IncomingMessage, type ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { handleUploadRoutes } from "./upload-routes.ts";
+import {
+  BodyTooLargeError,
+  InvalidJsonError,
+  readJsonBody,
+} from "./http-body.ts";
 import { createWardrobeStore, type WardrobeStore } from "./wardrobe.ts";
 import { handleWardrobeRoutes } from "./wardrobe-routes.ts";
 import { createTripPlanStore, type TripPlanStore } from "./trip-plan.ts";
@@ -19,12 +24,19 @@ import { handleItineraryRoutes } from "./itinerary-routes.ts";
 import { createPackingPlanStore, type PackingPlanStore } from "./packing-store.ts";
 import { handleTripGenerationRoutes } from "./trip-generation-routes.ts";
 import { generateTrip, type GenerateTrip } from "./trip-agent.ts";
+import { createTripJobs } from "./trip-jobs.ts";
+import { searchPlaces } from "./geocode.ts";
+import {
+  createRateLimiter,
+  rejectIfRateLimited,
+  type RateLimiter,
+} from "./rate-limit.ts";
 import { handleAssistantRoutes } from "./assistant-routes.ts";
 import { handleTranslationRoutes } from "./translation-routes.ts";
 import { assistantDataContext } from "./assistant-context.ts";
 import { handleCatalogRoutes, SCENARIO_IDS } from "./catalog-routes.ts";
 import { dirname, join } from "node:path";
-import { buildGeneratedPackingPlan, buildPackingPlan } from "./packing.ts";
+import { handlePackingRoutes } from "./packing-routes.ts";
 import {
   createAccountService,
   publicUser,
@@ -43,7 +55,11 @@ export type App = {
   close: () => void | Promise<void>;
 };
 
-type AppDependencies = { generateTrip?: GenerateTrip };
+type AppDependencies = {
+  generateTrip?: GenerateTrip;
+  autoSweep?: boolean;
+  rateLimiter?: RateLimiter;
+};
 type AppServices = {
   accounts: AccountService;
   wardrobe: WardrobeStore;
@@ -96,7 +112,14 @@ function createAppWithServices(
   const { accounts, wardrobe, tripPlans, itinerary, packingPlans } = services;
   // 合法场景 id 来自 catalog-routes,保存行程时据此校验(场景目录只有一处)。
   const scenarioIds = SCENARIO_IDS;
-  const runTripAgent = dependencies.generateTrip ?? generateTrip;
+  const limiter = dependencies.rateLimiter ?? createRateLimiter();
+  const jobs = createTripJobs({
+    tripPlans,
+    wardrobe,
+    userById: (id) => accounts.userById(id),
+    generateTrip: dependencies.generateTrip ?? generateTrip,
+    autoSweep: dependencies.autoSweep,
+  });
 
   function json(res: ServerResponse, status: number, body: unknown): void {
     res.writeHead(status, {
@@ -108,26 +131,10 @@ function createAppWithServices(
     res.end(JSON.stringify(body));
   }
 
-  // Trust boundary (AGENTS.md §4): request bodies are external input, so this
-  // is the one place we validate shape and size. Internal helpers below trust
-  // their callers. maxBytes is per-route: image upload needs a higher cap.
-  function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<any> {
-    return new Promise((resolve, reject) => {
-      let raw = "";
-      req.on("data", (c) => {
-        raw += c;
-        if (raw.length > maxBytes) reject(new Error("body too large"));
-      });
-      req.on("end", () => {
-        try {
-          resolve(raw ? JSON.parse(raw) : {});
-        } catch {
-          reject(new Error("invalid JSON"));
-        }
-      });
-      req.on("error", reject);
-    });
-  }
+  // Trust boundary (AGENTS.md §4): request bodies are external input; size
+  // and JSON shape are checked once in http-body.ts. maxBytes is per-route:
+  // image upload needs a higher cap.
+  const readBody = readJsonBody;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -142,7 +149,9 @@ function createAppWithServices(
       return;
     }
 
-    if (await accounts.handle(req, res, url, json, readBody)) {
+    if (rejectIfRateLimited(limiter, req, res, url.pathname, json)) return;
+
+    if (await accounts.handle(req, res, url, json, readBody, limiter)) {
       return;
     }
 
@@ -210,16 +219,30 @@ function createAppWithServices(
         actionContext: async () => {
           const actor = await accounts.userForRequest(req);
           if (!actor) return null;
-          const [wardrobeItems, plans] = await Promise.all([
+          const [wardrobeItems, plans, packing] = await Promise.all([
             wardrobe.list(actor.id),
             tripPlans.list(actor.id),
+            packingPlans.latest(actor.id),
           ]);
           return {
             userId: actor.id,
             scenarioIds,
             wardrobe,
             tripPlans,
-            promptContext: assistantDataContext(wardrobeItems, plans),
+            packingPlans,
+            geocode: async (placeName) => {
+              const lang = /[\u3400-\u9fff]/.test(placeName) ? "zh" : "en";
+              const place = (await searchPlaces(placeName, lang).catch(() => []))[0];
+              return place
+                ? { placeName: place.name, placeDetail: place.detail, lat: place.lat, lon: place.lon }
+                : null;
+            },
+            startTripGeneration: async (plan) => {
+              const saved = await tripPlans.save(actor.id, plan);
+              await jobs.start(actor.id, saved.id);
+              return saved;
+            },
+            promptContext: assistantDataContext(wardrobeItems, plans, packing),
             currentProfile: async () =>
               publicUser((await accounts.userForRequest(req)) ?? actor),
             updateProfile: (values) => accounts.updateProfile(actor.id, values),
@@ -251,10 +274,7 @@ function createAppWithServices(
         url,
         scenarioIds,
         tripPlans,
-        itinerary,
-        packingPlans,
-        wardrobe,
-        generateTrip: runTripAgent,
+        jobs,
         json,
         readBody,
         userFromHeader: () => accounts.userForRequest(req),
@@ -263,40 +283,18 @@ function createAppWithServices(
       return;
     }
 
-    // Packing plan. Session-gated because the plan is personal (and will draw
-    // on the user's wardrobe + itinerary once those exist). `balance` is the
-    // one query knob: 0 = pack lightest, 100 = most outfit variety (US 6.3).
-    // Trust boundary (AGENTS.md §4): coerce and clamp here; buildPackingPlan
-    // trusts its caller.
-    if (req.method === "GET" && url.pathname === "/api/packing") {
-      const user = await accounts.userForRequest(req);
-      if (!user) {
-        json(res, 401, { error: "Not signed in." });
-        return;
-      }
-      const rawParam = url.searchParams.get("balance");
-      const raw = rawParam === null ? NaN : Number(rawParam);
-      const balance = Number.isFinite(raw) ? raw : 50;
-      const tripPlanId = url.searchParams.get("tripPlanId");
-      const generated = await (tripPlanId
-        ? packingPlans.get(user.id, tripPlanId)
-        : packingPlans.latest(
-            user.id,
-            url.searchParams.get("scenario") ?? undefined
-          ));
-      if (tripPlanId && !generated) {
-        json(res, 404, { error: "Packing plan not found for this trip." });
-        return;
-      }
-      json(res, 200, {
-        plan: generated
-          ? buildGeneratedPackingPlan(
-              generated.packing,
-              balance,
-              generated.tripDays
-            )
-          : buildPackingPlan(balance),
-      });
+    // 打包清单与勾选状态,见 packing-routes.ts。
+    if (
+      await handlePackingRoutes({
+        req,
+        res,
+        url,
+        packingPlans,
+        json,
+        readBody,
+        userFromHeader: () => accounts.userForRequest(req),
+      })
+    ) {
       return;
     }
 
@@ -326,8 +324,6 @@ function createAppWithServices(
         json,
         readBody,
         userFromHeader: () => accounts.userForRequest(req),
-        userFromQuery: () =>
-          accounts.userForToken(url.searchParams.get("token") ?? undefined),
       })
     ) {
       return;
@@ -369,21 +365,32 @@ function createAppWithServices(
   return {
     handle: (req, res) =>
       handle(req, res).catch((err) => {
-        const message = err?.message ?? "Internal error.";
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
         // 请求体超限是用户能自己解决的问题(照片太大),之前被无差别转成 500,
         // 前端只看到看不懂的 "Request failed (500)"。给它专门的状态码和提示。
-        if (message === "body too large") {
+        if (err instanceof BodyTooLargeError) {
+          // The rest of the upload is never read; close instead of draining it.
+          res.setHeader("Connection", "close");
           json(res, 413, {
             error: "照片太大,请重新拍一张(或换张分辨率低一些的图片)。",
           });
           return;
         }
-        if (message === "invalid JSON") {
+        if (err instanceof InvalidJsonError) {
           json(res, 400, { error: "请求格式错误。" });
           return;
         }
-        json(res, 500, { error: message });
+        // Internal failures (database, bugs) are logged, not reflected: their
+        // messages can carry SQL or file paths the client has no use for.
+        console.error(`[api] ${req.method} ${req.url}:`, err);
+        json(res, 500, { error: "Internal error." });
       }),
-    close: services.close,
+    close: () => {
+      jobs.stop();
+      return services.close();
+    },
   };
 }

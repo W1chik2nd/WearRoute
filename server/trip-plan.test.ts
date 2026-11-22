@@ -52,17 +52,32 @@ test("save 存下行程并回填 id 和 createdAt", () => {
   assert.equal(saved.lon, 135.7681);
 });
 
-test("重启时把中断的后台任务标成失败", () => {
+test("重启不再直接判失败:租约过期的任务才能被接管,且只能被接管一次", () => {
   const db = freshDb();
   const store = createTripPlanStore(db);
   const saved = store.save("u1", KYOTO);
-  store.markGenerating("u1", saved.id);
-  assert.equal(store.list("u1")[0].generationStatus, "processing");
+  store.startGeneration("u1", saved.id, { token: "worker-a", leaseMs: 1_000 });
 
   const reopened = createTripPlanStore(db);
-  const interrupted = reopened.list("u1")[0];
-  assert.equal(interrupted.generationStatus, "failed");
-  assert.match(interrupted.generationError ?? "", /interrupted/);
+  assert.equal(reopened.list("u1")[0].generationStatus, "processing");
+  assert.deepEqual(reopened.expiredGenerations(500), [], "租约未过期时不可接管");
+  assert.equal(reopened.takeOverGeneration(saved.id, 500, { token: "b", leaseMs: 9_000 }), false);
+
+  assert.deepEqual(reopened.expiredGenerations(2_000), [
+    { planId: saved.id, userId: "u1", attempts: 1 },
+  ]);
+  assert.equal(reopened.takeOverGeneration(saved.id, 2_000, { token: "b", leaseMs: 9_000 }), true);
+  assert.equal(
+    reopened.takeOverGeneration(saved.id, 2_000, { token: "c", leaseMs: 9_000 }),
+    false,
+    "两个实例同时扫到时只有一个能接管"
+  );
+  assert.equal(reopened.renewGeneration(saved.id, { token: "worker-a", leaseMs: 9_999 }), false);
+  assert.equal(reopened.renewGeneration(saved.id, { token: "b", leaseMs: 9_999 }), true);
+
+  // 旧 worker 的失败不会覆盖新 worker 正在跑的任务。
+  reopened.markFailed("u1", saved.id, "stale", "worker-a");
+  assert.equal(reopened.get("u1", saved.id)?.generationStatus, "processing");
 });
 
 test("list 只返回本人的行程,且最新在前", () => {

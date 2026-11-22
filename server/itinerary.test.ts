@@ -227,3 +227,48 @@ test("photoQueries deduplicates and tolerates missing fields", () => {
   assert.ok(sparse.length > 0);
   assert.ok(sparse.every((q) => q.trim().length > 0));
 });
+
+test("a stop with no photo anywhere is not looked up again on every view", async (t) => {
+  const { handleItineraryRoutes } = await import("./itinerary-routes.ts");
+  const trip = store.seedDemoTrip(BEN, "travel");
+  const stopId = trip.days[0].stops[0].id;
+  let lookups = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    lookups += 1;
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  });
+  const ask = async () => {
+    let body: any;
+    await handleItineraryRoutes({
+      req: { method: "GET" } as any,
+      res: {} as any,
+      url: new URL(`http://x/api/itinerary/photo/${stopId}`),
+      itinerary: store,
+      json: (_res, _status, payload) => { body = payload; },
+      userFromHeader: () => ({ id: BEN }),
+    });
+    return body;
+  };
+  const previous = process.env.PHOTO_PROVIDER;
+  process.env.PHOTO_PROVIDER = "openverse";
+  t.after(() => { process.env.PHOTO_PROVIDER = previous; });
+
+  assert.deepEqual(await ask(), { photo: null });
+  const afterFirst = lookups;
+  assert.ok(afterFirst > 0);
+  assert.deepEqual(await ask(), { photo: null, cached: true });
+  assert.equal(lookups, afterFirst, "the miss is remembered");
+  assert.ok(store.stop(BEN, stopId)?.photoMissingAt);
+});
+
+test("a library outage is reported, not remembered as a missing photo", async (t) => {
+  const { findPhotoForSubject } = await import("./photos.ts");
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 429 }));
+  const previous = process.env.PHOTO_PROVIDER;
+  process.env.PHOTO_PROVIDER = "openverse";
+  t.after(() => { process.env.PHOTO_PROVIDER = previous; });
+  await assert.rejects(
+    findPhotoForSubject({ name: "祇园", nameEn: "Gion", city: "京都", cityEn: "Kyoto", kind: "spot" }),
+    /openverse 429/
+  );
+});

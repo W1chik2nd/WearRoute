@@ -91,7 +91,7 @@ function jsonItems(value: string): BilingualItem[] {
   return JSON.parse(value) as BilingualItem[];
 }
 
-async function insertGenerated(
+export async function insertGenerated(
   db: PostgresQueryable,
   userId: string,
   sourcePlanId: string,
@@ -299,15 +299,10 @@ export function createPostgresItineraryStore(
       return hydrate((await findTrip(userId, tripId))!);
     },
 
-    async saveGenerated(userId, sourcePlanId, scenario, generated) {
-      const tripId = await inTransaction(pool, (client) =>
-        insertGenerated(client, userId, sourcePlanId, scenario, generated)
-      );
-      return hydrate((await findTrip(userId, tripId))!);
-    },
-
     async stop(userId, stopId) {
-      const value = await row<StopRow & { city: string; city_en: string }>(
+      const value = await row<
+        StopRow & { city: string; city_en: string; photo_missing_at: string | null }
+      >(
         pool,
         `SELECT s.*, d.city, d.city_en
            FROM trip_stops s
@@ -317,14 +312,21 @@ export function createPostgresItineraryStore(
         [stopId, userId]
       );
       return value
-        ? ({ ...toStop(value), city: value.city, cityEn: value.city_en } as StopWithCity)
+        ? ({
+            ...toStop(value),
+            city: value.city,
+            cityEn: value.city_en,
+            // BIGINT arrives as a string from pg.
+            photoMissingAt: value.photo_missing_at === null ? null : Number(value.photo_missing_at),
+          } as StopWithCity)
         : null;
     },
 
     async setStopPhoto(userId, stopId, photo: PhotoPatch) {
       await pool.query(
         `UPDATE trip_stops
-            SET photo_url = $1, photo_credit = $2, photo_source_url = $3
+            SET photo_url = $1, photo_credit = $2, photo_source_url = $3,
+                photo_missing_at = NULL
           WHERE id = $4 AND day_id IN (
             SELECT d.id FROM trip_days d
               JOIN trips t ON t.id = d.trip_id
@@ -337,6 +339,18 @@ export function createPostgresItineraryStore(
           stopId,
           userId,
         ]
+      );
+    },
+
+    async markStopPhotoMissing(userId, stopId, at) {
+      await pool.query(
+        `UPDATE trip_stops SET photo_missing_at = $1
+          WHERE id = $2 AND day_id IN (
+            SELECT d.id FROM trip_days d
+              JOIN trips t ON t.id = d.trip_id
+             WHERE t.user_id = $3
+          )`,
+        [at, stopId, userId]
       );
     },
   };

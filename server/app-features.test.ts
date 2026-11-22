@@ -99,20 +99,13 @@ test("chat requires a session and a configured provider", async () => {
   assert.match(unconfigured.body.error, /AI_API_KEY/);
 });
 
-test("packing requires a session and responds to the balance slider", async () => {
+test("packing requires a session and never invents a list without a trip", async () => {
   assert.equal((await get("/api/packing?balance=50")).status, 401);
-
-  const lean = await get("/api/packing?balance=0", token);
-  assert.equal(lean.status, 200);
-  assert.equal(lean.body.plan.balance, 0);
-  assert.ok(lean.body.plan.categories.length > 0);
-  assert.equal(lean.body.plan.essentials[0].label, "身份证");
-
-  const varied = await get("/api/packing?balance=100", token);
-  const count = (plan: any) =>
-    plan.categories.reduce((sum: number, category: any) => sum + category.items.length, 0);
-  assert.ok(count(varied.body.plan) > count(lean.body.plan));
-  assert.equal((await get("/api/packing", token)).body.plan.balance, 50);
+  // No generated trip yet: an honest 404 the client shows as an empty state,
+  // not a generic list of clothes the user does not own.
+  const none = await get("/api/packing?balance=0", token);
+  assert.equal(none.status, 404);
+  assert.match(none.body.error, /Generate a trip first/);
 });
 
 test("outfit plan requires a session and can select a saved trip", async () => {

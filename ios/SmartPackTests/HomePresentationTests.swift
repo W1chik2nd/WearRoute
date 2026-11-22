@@ -72,14 +72,18 @@ final class HomePresentationTests: XCTestCase {
         }
     }
 
-    func testWardrobeFiltersSplitGenericBottomsBySubtype() {
-        let skirt = wardrobeItem(id: "skirt", title: "米色 A 字裙", category: "下装", subtype: "A字裙")
-        let trousers = wardrobeItem(id: "trousers", title: "藏蓝直筒裤", category: "下装", subtype: "直筒裤")
-        let top = wardrobeItem(id: "top", title: "黄色连帽卫衣", category: "上衣", subtype: "连帽卫衣")
+    func testWardrobeFiltersUseTheServerKind() {
+        let skirt = wardrobeItem(id: "skirt", title: "米色 A 字裙", category: "下装", subtype: "A字裙", kind: .skirt)
+        let trousers = wardrobeItem(id: "trousers", title: "藏蓝直筒裤", category: "下装", subtype: "直筒裤", kind: .pants)
+        let hoodie = wardrobeItem(id: "hoodie", title: "黄色连帽卫衣", category: "卫衣", subtype: "连帽卫衣", kind: .top)
+        let unknown = wardrobeItem(id: "umbrella", title: "折叠伞", category: "雨伞", subtype: "", kind: nil)
+        let all = [skirt, trousers, hoodie, unknown]
 
-        XCTAssertEqual(WardrobeFilter.skirts.apply(to: [skirt, trousers, top]).map(\.id), ["skirt"])
-        XCTAssertEqual(WardrobeFilter.pants.apply(to: [skirt, trousers, top]).map(\.id), ["trousers"])
-        XCTAssertEqual(WardrobeFilter.tops.apply(to: [skirt, trousers, top]).map(\.id), ["top"])
+        XCTAssertEqual(WardrobeFilter.skirts.apply(to: all).map(\.id), ["skirt"])
+        XCTAssertEqual(WardrobeFilter.pants.apply(to: all).map(\.id), ["trousers"])
+        XCTAssertEqual(WardrobeFilter.tops.apply(to: all).map(\.id), ["hoodie"])
+        XCTAssertEqual(WardrobeFilter.accessories.apply(to: all).map(\.id), [])
+        XCTAssertEqual(WardrobeFilter.all.apply(to: all).count, 4)
     }
 
     func testTripWeatherContractDecodes() throws {
@@ -90,6 +94,20 @@ final class HomePresentationTests: XCTestCase {
         XCTAssertEqual(response.trip.dayCount, 2)
         XCTAssertEqual(response.forecast.days.first?.condition, "Rain")
         XCTAssertEqual(response.forecast.days.first?.precipitationProbability, 75)
+    }
+
+    func testTypicalWeatherAndForecastChangesDecode() throws {
+        let json = Data(#"{"trip":{"id":"trip-1","destination":"Kyoto","destinationDetail":"Japan","startDate":"2026-12-01","endDate":"2026-12-01","dayCount":1},"forecast":{"source":"Open-Meteo","available":true,"note":"","days":[{"date":"2026-12-01","basis":"typical","condition":"Rain","minTempC":3,"maxTempC":10,"precipitationProbability":67,"uvIndex":null,"maxWindKph":12}]},"changes":[{"date":"2026-12-01","kind":"rain","before":10,"after":80}]}"#.utf8)
+
+        let response = try JSONDecoder().decode(TripWeatherResponse.self, from: json)
+
+        XCTAssertTrue(response.forecast.days[0].isTypical)
+        XCTAssertNil(response.forecast.days[0].uvIndex)
+        XCTAssertEqual(response.changes?.first?.kind, "rain")
+        XCTAssertEqual(
+            Strings.weatherChange(response.changes![0], date: "Dec 1", .en),
+            "Dec 1: rain chance 10% → 80% — pack an umbrella"
+        )
     }
 
     func testScenarioArtworkUsesCatalogFilename() {
@@ -233,7 +251,8 @@ final class HomePresentationTests: XCTestCase {
         id: String,
         title: String,
         category: String,
-        subtype: String
+        subtype: String,
+        kind: WardrobeKind? = .top
     ) -> WardrobeItem {
         WardrobeItem(
             id: id,
@@ -249,6 +268,7 @@ final class HomePresentationTests: XCTestCase {
             details: "",
             hasPhoto: false,
             createdAt: "2026-08-25T00:00:00Z",
+            kind: kind,
             visual: piece(id: id, kind: category == "上衣" ? .top : .bottom)
         )
     }

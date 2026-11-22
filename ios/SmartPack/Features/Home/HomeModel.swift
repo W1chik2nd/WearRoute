@@ -7,6 +7,8 @@ import Foundation
 @MainActor
 final class HomeModel {
     private(set) var trips: [TripPlan]?
+    /// The last refresh failed; the previous list (if any) stays on screen.
+    private(set) var tripsLoadFailed = false
     private(set) var weather: Weather?
     private(set) var weatherFailed = false
     private(set) var todayOutfit: OutfitDay?
@@ -48,17 +50,24 @@ final class HomeModel {
     }
 
     private func pollTrips() async {
+        var delay: Double = 2
         while !Task.isCancelled {
             do {
                 let plans = try await api.tripPlans().plans
                 trips = plans.filter { !deletedIds.contains($0.id) }
+                tripsLoadFailed = false
+                delay = 2
                 syncSelection()
                 guard plans.contains(where: { $0.generationStatus == .processing }) else { return }
+            } catch let error as APIClient.APIError where error.isUnauthorized {
+                return // AppState sends the user back to sign-in.
             } catch {
-                trips = []
-                return
+                // Keep whatever was shown. Replacing it with [] used to turn
+                // one dropped request into the "no trips yet" empty state.
+                tripsLoadFailed = true
+                delay = min(delay * 2, 30)
             }
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(delay))
         }
     }
 

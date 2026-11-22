@@ -6,6 +6,7 @@ import type { NewTripPlan } from "./trip-plan.ts";
 import { TRIP_AGENT_PROMPT, tripPlanSchema } from "./trip-agent-prompt.ts";
 import type { GeneratedTripPlan } from "./trip-agent-types.ts";
 import { isoDateRange } from "../shared/trip-constraints.ts";
+import { wardrobeKind, type WardrobeKind } from "./wardrobe-kind.ts";
 
 export { isoDateRange as tripDates } from "../shared/trip-constraints.ts";
 
@@ -102,46 +103,95 @@ export function normalizeGeneratedTrip(
     throw new Error("AI trip planner returned the wrong travel dates.");
   }
 
+  reconcileWardrobe(raw, dates.length, wardrobe);
+  return raw;
+}
+
+// Packing rows the server adds for owned pieces the model wore but forgot to
+// pack. Ids match the enum in trip-agent-prompt.ts.
+const PACKING_CATEGORY: Record<WardrobeKind | "other", { id: string; title: string; titleEn: string }> = {
+  top: { id: "tops", title: "上装", titleEn: "Tops" },
+  pants: { id: "bottoms", title: "下装", titleEn: "Bottoms" },
+  skirt: { id: "bottoms", title: "下装", titleEn: "Bottoms" },
+  shoes: { id: "shoes", title: "鞋履", titleEn: "Shoes" },
+  accessory: { id: "accessories", title: "配饰", titleEn: "Accessories" },
+  other: { id: "accessories", title: "配饰", titleEn: "Accessories" },
+};
+
+/**
+ * The daily outfits are the source of truth for owned clothing; the packing
+ * list is derived from them rather than trusted alongside them.
+ *
+ * Previously an owned piece worn in an outfit but missing from the packing
+ * list was rewritten as a wardrobe gap (telling the user to buy something
+ * they own), and each row's daysUsed was whatever the model claimed, so the
+ * checklist and the day cards could disagree.
+ */
+function reconcileWardrobe(
+  raw: GeneratedTripPlan,
+  dayCount: number,
+  wardrobe: WardrobeItem[]
+): void {
   const ownedItems = new Map(wardrobe.map((item) => [item.id, item]));
-  const owned = new Set(ownedItems.keys());
-  const packedWardrobeIds = new Set(
-    raw.packing.categories.flatMap((category) =>
-      category.items
-        .map((item) => item.wardrobeItemId)
-        .filter((id): id is string => Boolean(id))
-    )
-  );
-  for (const day of raw.days) {
+  const wornOn = new Map<string, Set<number>>();
+  const englishLabel = new Map<string, string>();
+
+  raw.days.forEach((day, index) => {
     day.outfit = day.outfit.map((item) => {
-      if (
-        !item.wardrobeItemId ||
-        !owned.has(item.wardrobeItemId) ||
-        !packedWardrobeIds.has(item.wardrobeItemId)
-      ) {
-        return { ...item, wardrobeItemId: "", hasPhoto: false };
-      }
-      const wardrobeItem = ownedItems.get(item.wardrobeItemId)!;
-      return {
-        ...item,
-        label: wardrobeItem.title,
-        labelEn: item.labelEn || wardrobeItem.title,
-        hasPhoto: wardrobeItem.hasPhoto,
-      };
+      const owned = item.wardrobeItemId ? ownedItems.get(item.wardrobeItemId) : undefined;
+      if (!owned) return { ...item, wardrobeItemId: "", hasPhoto: false };
+      wornOn.set(owned.id, (wornOn.get(owned.id) ?? new Set()).add(index + 1));
+      const labelEn = item.labelEn || owned.titleEn || owned.title;
+      englishLabel.set(owned.id, labelEn);
+      return { ...item, label: owned.title, labelEn, hasPhoto: owned.hasPhoto };
     });
-  }
+  });
+
+  const packed = new Set<string>();
   for (const category of raw.packing.categories) {
-    for (const item of category.items) {
-      item.daysUsed = [...new Set(item.daysUsed)]
-        .filter((day) => Number.isInteger(day) && day >= 1 && day <= dates.length)
-        .sort((a, b) => a - b);
-      if (item.daysUsed.length === 0) item.daysUsed = [1];
-      item.reuse = item.daysUsed.length;
-      if (item.wardrobeItemId && !owned.has(item.wardrobeItemId)) {
+    category.items = category.items.filter((item) => {
+      if (item.wardrobeItemId && !ownedItems.has(item.wardrobeItemId)) {
         item.wardrobeItemId = "";
       }
-    }
+      // One row per owned piece; a repeated row would double-count it.
+      if (item.wardrobeItemId && packed.has(item.wardrobeItemId)) return false;
+      const worn = item.wardrobeItemId ? wornOn.get(item.wardrobeItemId) : undefined;
+      if (worn) {
+        packed.add(item.wardrobeItemId);
+        item.daysUsed = [...worn].sort((a, b) => a - b);
+        // Worn in the itinerary, so even the leanest packing keeps it.
+        item.priority = "core";
+      } else {
+        item.daysUsed = [...new Set(item.daysUsed)]
+          .filter((day) => Number.isInteger(day) && day >= 1 && day <= dayCount)
+          .sort((a, b) => a - b);
+        if (item.daysUsed.length === 0) item.daysUsed = [1];
+      }
+      item.reuse = item.daysUsed.length;
+      return true;
+    });
   }
-  return raw;
+
+  for (const [id, days] of wornOn) {
+    if (packed.has(id)) continue;
+    const owned = ownedItems.get(id)!;
+    const target = PACKING_CATEGORY[wardrobeKind(owned) ?? "other"];
+    let category = raw.packing.categories.find((c) => c.id === target.id);
+    if (!category) {
+      category = { ...target, items: [] };
+      raw.packing.categories.push(category);
+    }
+    const daysUsed = [...days].sort((a, b) => a - b);
+    category.items.push({
+      label: owned.title,
+      labelEn: englishLabel.get(id) ?? (owned.titleEn || owned.title),
+      quantity: 1,
+      reuse: daysUsed.length,
+      priority: "core",
+      daysUsed,
+      wardrobeItemId: id,
+    });
+  }
 }
 
 export const generateTrip: GenerateTrip = async ({ user, plan, wardrobe }) => {
@@ -164,6 +214,7 @@ export const generateTrip: GenerateTrip = async ({ user, plan, wardrobe }) => {
       wardrobe: wardrobe.map((item) => ({
         wardrobeItemId: item.id,
         title: item.title,
+        titleEn: item.titleEn,
         category: item.category,
         subtype: item.subtype,
         count: item.count,
@@ -184,5 +235,8 @@ export const generateTrip: GenerateTrip = async ({ user, plan, wardrobe }) => {
       weather: forecast,
     },
   });
-  return normalizeGeneratedTrip(generated, dates, wardrobe);
+  return {
+    ...normalizeGeneratedTrip(generated, dates, wardrobe),
+    weatherSnapshot: forecast,
+  };
 };

@@ -1,4 +1,5 @@
-import { scryptSync, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
+import { scrypt, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import { type IncomingMessage, type ServerResponse } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -8,6 +9,7 @@ import {
   type ProfileValues,
 } from "./profile.ts";
 import type { AsyncValue } from "./async-value.ts";
+import { LOGIN_PER_EMAIL, tooManyRequests, type RateLimiter } from "./rate-limit.ts";
 
 export type UserRow = {
   id: string;
@@ -34,23 +36,55 @@ export type UserRow = {
 
 type Json = (res: ServerResponse, status: number, body: unknown) => void;
 type ReadBody = (req: IncomingMessage, maxBytes?: number) => Promise<any>;
+type Handle = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  json: Json,
+  readBody: ReadBody,
+  limiter: RateLimiter
+) => Promise<boolean>;
 
 export type AccountService = {
-  handle: (
-    req: IncomingMessage,
-    res: ServerResponse,
-    url: URL,
-    json: Json,
-    readBody: ReadBody
-  ) => Promise<boolean>;
+  handle: Handle;
   userForRequest: (req: IncomingMessage) => AsyncValue<UserRow | null>;
   userForToken: (token: string | undefined) => AsyncValue<UserRow | null>;
+  /** Background jobs act for a user without a request (trip-jobs.ts). */
+  userById: (id: string) => AsyncValue<UserRow | null>;
   updateProfile: (userId: string, values: ProfileValues) => AsyncValue<PublicUser>;
 };
 
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: string,
+  keylen: number
+) => Promise<Buffer>;
+
+/**
+ * scrypt is deliberately slow; the synchronous version blocked the event
+ * loop, so every login attempt stalled every other request on the server.
+ */
 export const hashPassword = (password: string, salt: string) =>
-  scryptSync(password, salt, 64);
+  scryptAsync(password, salt, 64);
+
+/** Sessions last 30 days and slide forward while in use. */
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Renew at most once a day, so reads do not turn into writes. */
+export const SESSION_RENEW_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** Shared login throttle for both account stores; true when rejected. */
+export function loginThrottled(
+  limiter: RateLimiter,
+  email: string,
+  res: ServerResponse,
+  json: Json
+): boolean {
+  const wait = limiter.hit(`login ${email.trim().toLowerCase()}`, LOGIN_PER_EMAIL);
+  if (wait === 0) return false;
+  tooManyRequests(res, json, wait);
+  return true;
+}
 
 export function publicUser(u: UserRow) {
   return {
@@ -94,6 +128,18 @@ export function createAccountService(db: DatabaseSync): AccountService {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  const sessionColumns = new Set(
+    (db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]).map(
+      (column) => column.name
+    )
+  );
+  if (!sessionColumns.has("expires_at")) {
+    // Sessions used to live forever; existing ones get a normal lifetime.
+    db.exec(`ALTER TABLE sessions ADD COLUMN expires_at INTEGER`);
+    db.prepare(`UPDATE sessions SET expires_at = ? WHERE expires_at IS NULL`).run(
+      Date.now() + SESSION_TTL_MS
+    );
+  }
   const existing = new Set(
     (db.prepare(`PRAGMA table_info(users)`).all() as { name: string }[]).map(
       (column) => column.name
@@ -110,18 +156,33 @@ export function createAccountService(db: DatabaseSync): AccountService {
 
   function userForToken(token: string | undefined): UserRow | null {
     if (!token) return null;
+    const now = Date.now();
+    const session = db
+      .prepare(`SELECT user_id, expires_at FROM sessions WHERE token = ? AND expires_at > ?`)
+      .get(token, now) as { user_id: string; expires_at: number } | undefined;
+    if (!session) return null;
+    if (session.expires_at - now < SESSION_TTL_MS - SESSION_RENEW_AFTER_MS) {
+      db.prepare(`UPDATE sessions SET expires_at = ? WHERE token = ?`).run(
+        now + SESSION_TTL_MS,
+        token
+      );
+    }
     return (
-      (db
-        .prepare(
-          `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`
-        )
-        .get(token) as UserRow | undefined) ?? null
+      (db.prepare(`SELECT * FROM users WHERE id = ?`).get(session.user_id) as
+        | UserRow
+        | undefined) ?? null
     );
   }
 
   function createSession(userId: string): string {
     const token = randomBytes(32).toString("hex");
-    db.prepare(`INSERT INTO sessions (token, user_id) VALUES (?, ?)`).run(token, userId);
+    const now = Date.now();
+    db.prepare(`DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?`).run(userId, now);
+    db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`).run(
+      token,
+      userId,
+      now + SESSION_TTL_MS
+    );
     return token;
   }
 
@@ -135,13 +196,7 @@ export function createAccountService(db: DatabaseSync): AccountService {
     return publicUser(updated);
   }
 
-  async function handle(
-    req: IncomingMessage,
-    res: ServerResponse,
-    url: URL,
-    json: Json,
-    readBody: ReadBody
-  ): Promise<boolean> {
+  const handle: Handle = async (req, res, url, json, readBody, limiter) => {
     if (req.method === "POST" && url.pathname === "/api/check-email") {
       const { email } = await readBody(req);
       if (typeof email !== "string" || !EMAIL_RE.test(email.trim())) {
@@ -183,7 +238,7 @@ export function createAccountService(db: DatabaseSync): AccountService {
       }
       const id = randomUUID();
       const salt = randomBytes(16).toString("hex");
-      const hash = hashPassword(password, salt).toString("hex");
+      const hash = (await hashPassword(password, salt)).toString("hex");
       const columns = Object.keys(profile.values);
       db.prepare(
         `INSERT INTO users (id, email, pass_salt, pass_hash, ${columns.join(", ")})
@@ -206,6 +261,7 @@ export function createAccountService(db: DatabaseSync): AccountService {
         json(res, 400, { error: "Email and password are required." });
         return true;
       }
+      if (loginThrottled(limiter, email, res, json)) return true;
       const user = db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.trim()) as
         | UserRow
         | undefined;
@@ -214,7 +270,7 @@ export function createAccountService(db: DatabaseSync): AccountService {
         return true;
       }
       const expected = Buffer.from(user.pass_hash, "hex");
-      const actual = hashPassword(password, user.pass_salt);
+      const actual = await hashPassword(password, user.pass_salt);
       if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
         json(res, 401, { error: "Incorrect email or password." });
         return true;
@@ -256,12 +312,14 @@ export function createAccountService(db: DatabaseSync): AccountService {
     }
 
     return false;
-  }
+  };
 
   return {
     handle,
     userForRequest: (req) => userForToken(bearerToken(req)),
     userForToken,
+    userById: (id) =>
+      (db.prepare(`SELECT * FROM users WHERE id = ?`).get(id) as UserRow | undefined) ?? null,
     updateProfile,
   };
 }

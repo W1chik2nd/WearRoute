@@ -3,7 +3,10 @@ import { type IncomingMessage } from "node:http";
 import {
   EMAIL_RE,
   hashPassword,
+  loginThrottled,
   publicUser,
+  SESSION_RENEW_AFTER_MS,
+  SESSION_TTL_MS,
   type AccountService,
   type UserRow,
 } from "./account-routes.ts";
@@ -24,21 +27,34 @@ export function createPostgresAccountService(
 ): AccountService {
   async function userForToken(token: string | undefined): Promise<UserRow | null> {
     if (!token) return null;
+    const now = Date.now();
+    // Expired sessions match nothing. Renewal slides the expiry forward at
+    // most once a day, so most reads stay reads.
+    await pool.query(
+      `UPDATE sessions SET expires_at = $1
+        WHERE token = $2 AND expires_at > $3 AND expires_at < $4`,
+      [now + SESSION_TTL_MS, token, now, now + SESSION_TTL_MS - SESSION_RENEW_AFTER_MS]
+    );
     return row<UserRow>(
       pool,
       `SELECT u.*
          FROM sessions s
          JOIN users u ON u.id = s.user_id
-        WHERE s.token = $1`,
-      [token]
+        WHERE s.token = $1 AND s.expires_at > $2`,
+      [token, now]
     );
   }
 
   async function createSession(userId: string): Promise<string> {
     const token = randomBytes(32).toString("hex");
+    const now = Date.now();
+    await pool.query(`DELETE FROM sessions WHERE user_id = $1 AND expires_at <= $2`, [
+      userId,
+      now,
+    ]);
     await pool.query(
-      `INSERT INTO sessions (token, user_id) VALUES ($1, $2)`,
-      [token, userId]
+      `INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)`,
+      [token, userId, now + SESSION_TTL_MS]
     );
     return token;
   }
@@ -60,7 +76,7 @@ export function createPostgresAccountService(
   }
 
   return {
-    async handle(req, res, url, json, readBody) {
+    async handle(req, res, url, json, readBody, limiter) {
       if (req.method === "POST" && url.pathname === "/api/check-email") {
         const { email } = await readBody(req);
         if (typeof email !== "string" || !EMAIL_RE.test(email.trim())) {
@@ -112,7 +128,7 @@ export function createPostgresAccountService(
         }
         const id = randomUUID();
         const salt = randomBytes(16).toString("hex");
-        const hash = hashPassword(password, salt).toString("hex");
+        const hash = (await hashPassword(password, salt)).toString("hex");
         const columns = Object.keys(profile.values);
         const values = [
           id,
@@ -143,6 +159,7 @@ export function createPostgresAccountService(
           json(res, 400, { error: "Email and password are required." });
           return true;
         }
+        if (loginThrottled(limiter, email, res, json)) return true;
         const user = await row<UserRow>(
           pool,
           `SELECT * FROM users WHERE LOWER(email) = LOWER($1)`,
@@ -153,7 +170,7 @@ export function createPostgresAccountService(
           return true;
         }
         const expected = Buffer.from(user.pass_hash, "hex");
-        const actual = hashPassword(password, user.pass_salt);
+        const actual = await hashPassword(password, user.pass_salt);
         if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
           json(res, 401, { error: "Incorrect email or password." });
           return true;
@@ -201,6 +218,7 @@ export function createPostgresAccountService(
     },
     userForRequest: (req) => userForToken(bearerToken(req)),
     userForToken,
+    userById: (id) => row<UserRow>(pool, `SELECT * FROM users WHERE id = $1`, [id]),
     updateProfile,
   };
 }

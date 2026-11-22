@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { WardrobeItem } from "../shared/wardrobe-types.ts";
-import type { ItemPatch, NewItem, WardrobeStore } from "./wardrobe.ts";
+import { patchColumns, type ItemPatch, type NewItem, type WardrobeStore } from "./wardrobe.ts";
 import { row, rows, type PostgresPool } from "./postgres.ts";
 
 type WardrobeRow = {
   id: string;
   title: string;
+  title_en: string;
   category: string;
   subtype: string;
   count: number;
@@ -32,6 +33,7 @@ function toItem(value: WardrobeRow): WardrobeItem {
   return {
     id: value.id,
     title: value.title,
+    titleEn: value.title_en ?? "",
     category: value.category,
     subtype: value.subtype ?? "",
     count: value.count,
@@ -50,7 +52,7 @@ function toItem(value: WardrobeRow): WardrobeItem {
 }
 
 const SELECT_ITEM = `
-  SELECT id, title, category, subtype, count, colors, fit, material,
+  SELECT id, title, title_en, category, subtype, count, colors, fit, material,
          seasons, style_tags, details, photo_data IS NOT NULL AS has_photo,
          created_at
     FROM wardrobe_items`;
@@ -95,17 +97,18 @@ export function createPostgresWardrobeStore(
       const saved = await row<WardrobeRow>(
         pool,
         `INSERT INTO wardrobe_items
-           (id, user_id, title, category, subtype, count, colors, fit, material,
-            seasons, style_tags, details, photo_data, photo_content_type)
+           (id, user_id, title, title_en, category, subtype, count, colors, fit,
+            material, seasons, style_tags, details, photo_data, photo_content_type)
          VALUES
-           ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-         RETURNING id, title, category, subtype, count, colors, fit, material,
+           ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id, title, title_en, category, subtype, count, colors, fit, material,
                    seasons, style_tags, details,
                    photo_data IS NOT NULL AS has_photo, created_at`,
         [
           id,
           userId,
           item.title,
+          item.titleEn ?? "",
           item.category,
           item.subtype ?? "",
           item.count ?? 1,
@@ -123,14 +126,7 @@ export function createPostgresWardrobeStore(
     },
 
     async update(userId, id, patch: ItemPatch) {
-      const columns: Record<string, string | number> = {};
-      if (patch.title !== undefined) columns.title = patch.title;
-      if (patch.category !== undefined) columns.category = patch.category;
-      if (patch.subtype !== undefined) columns.subtype = patch.subtype;
-      if (patch.count !== undefined) columns.count = patch.count;
-      if (patch.fit !== undefined) columns.fit = patch.fit;
-      if (patch.material !== undefined) columns.material = patch.material;
-      if (patch.details !== undefined) columns.details = patch.details;
+      const columns = patchColumns(patch);
       const keys = Object.keys(columns);
       if (keys.length === 0) {
         const existing = await find(userId, id);
@@ -142,7 +138,7 @@ export function createPostgresWardrobeStore(
         `UPDATE wardrobe_items
             SET ${keys.map((key, index) => `${key} = $${index + 1}`).join(", ")}
           WHERE id = $${keys.length + 1} AND user_id = $${keys.length + 2}
-          RETURNING id, title, category, subtype, count, colors, fit, material,
+          RETURNING id, title, title_en, category, subtype, count, colors, fit, material,
                     seasons, style_tags, details,
                     photo_data IS NOT NULL AS has_photo, created_at`,
         [...values, id, userId]

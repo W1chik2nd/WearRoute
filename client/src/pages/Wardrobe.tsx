@@ -16,6 +16,7 @@ import {
   type WardrobeFilterId,
 } from "../lib/wardrobe-filter";
 import { useLang } from "../i18n/useLang";
+import { useLocalizedValues } from "../hooks/useLocalizedValues";
 import {
   confirmDeleteMessage,
   unreachableHostMessage,
@@ -65,6 +66,12 @@ export default function Wardrobe({ onBack }: Props) {
   const [categoryFilter, setCategoryFilter] = useState<WardrobeFilterId>("all");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const filteredItems = filterWardrobeItems(items, categoryFilter);
+  // Recognition stores an English title; only items saved before that fall
+  // back to the translation service.
+  const titles = useLocalizedValues(
+    filteredItems.map((item) => ({ zh: item.title, en: item.titleEn })),
+    lang
+  );
   const activeFilterLabel =
     t(
       WARDROBE_FILTER_OPTIONS.find((option) => option.id === categoryFilter)
@@ -242,13 +249,13 @@ export default function Wardrobe({ onBack }: Props) {
           </article>
         ))}
 
-        {filteredItems.map((item) => (
+        {filteredItems.map((item, index) => (
           <article key={item.id} className="wardrobe-cell">
             <span className="wardrobe-count">×{item.count}</span>
             <button
               className="wardrobe-delete"
-              onClick={() => handleDelete(item.id, item.title)}
-              aria-label={`${t("wardrobeDelete")} ${item.title}`}
+              onClick={() => handleDelete(item.id, titles[index])}
+              aria-label={`${t("wardrobeDelete")} ${titles[index]}`}
               title={t("wardrobeDelete")}
             >
               ✕
@@ -257,7 +264,7 @@ export default function Wardrobe({ onBack }: Props) {
               <OutfitPieceVisual piece={item.visual} wardrobe />
             </span>
             {/* 大标题:颜色+版型+品类,如“黄色宽松外套” */}
-            <span className="wardrobe-item-title">{item.title}</span>
+            <span className="wardrobe-item-title">{titles[index]}</span>
             {/* 细节以标签形式简要呈现;完整细节存在库里供 AI 分析 */}
             <span className="wardrobe-item-meta">
               {[item.subtype || item.category, item.fit, item.material]

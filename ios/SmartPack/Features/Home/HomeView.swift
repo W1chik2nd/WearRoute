@@ -31,6 +31,13 @@ struct HomeView: View {
                 emptyCard
             }
 
+            if model.tripsLoadFailed {
+                Text(Strings.tripsLoadRetrying(lang))
+                    .font(Theme.bold(13))
+                    .foregroundStyle(Theme.textSecondary)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+
         }
         .onReceive(clock) { now = $0 }
         .onAppear { model.start() }

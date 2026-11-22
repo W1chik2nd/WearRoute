@@ -223,6 +223,12 @@
 .trip-weather-message { border: var(--border); background: var(--white); box-shadow: 6px 6px 0 var(--black); }
 .trip-weather-message button { padding: 8px 12px; border: var(--border); background: var(--yellow); font: inherit; font-weight: var(--weight-heavy); cursor: pointer; }
 
+.trip-weather-changes { margin-bottom: var(--space-3); padding: var(--space-2) var(--space-3); border: var(--border); background: var(--yellow); box-shadow: 6px 6px 0 var(--black); }
+.trip-weather-changes h2 { margin: 0 0 var(--space-1); font-size: 18px; }
+.trip-weather-changes ul { margin: 0; padding-left: 1.2em; font-weight: var(--weight-bold); }
+.trip-weather-typical { margin-left: 8px; padding: 1px 6px; border: 2px solid var(--black); background: var(--white); font-size: 12px; font-style: normal; font-weight: var(--weight-heavy); }
+.trip-weather-typical-hint { margin: var(--space-2) 0 0; font-size: 14px; font-weight: var(--weight-bold); }
+
 @media (max-width: 760px) {
   .trip-weather-page { padding: 76px var(--space-2) var(--space-3); }
   .trip-weather-heading { align-items: flex-start; }

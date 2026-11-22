@@ -70,6 +70,8 @@ async function searchJd(keyword: string): Promise<Product[]> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(params).toString(),
+    // "Shop similar" is optional; it must not hold up the recognition reply.
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) throw new Error(`jd api ${res.status}`);
 
@@ -104,6 +106,8 @@ async function searchTaobao(keyword: string): Promise<Product[]> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(params).toString(),
+    // "Shop similar" is optional; it must not hold up the recognition reply.
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) throw new Error(`taobao api ${res.status}`);
 

@@ -343,10 +343,20 @@ struct TripSetupView: View {
     /// Generation runs on the server; poll the durable status until it settles.
     private func pollGeneration() async {
         guard let planId = generation?.planId else { return }
+        var delay: Double = 2.5
         while !Task.isCancelled, isGenerating {
-            try? await Task.sleep(for: .seconds(2.5))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            guard let response = try? await APIClient.shared.tripPlan(id: planId) else { continue }
+            let response: TripPlanResponse
+            do {
+                response = try await APIClient.shared.tripPlan(id: planId)
+                delay = 2.5
+            } catch let error as APIClient.APIError where error.status == 404 || error.isUnauthorized {
+                return // Deleted elsewhere, or signed out: nothing left to wait for.
+            } catch {
+                delay = min(delay * 2, 30) // Back off instead of hammering a struggling server.
+                continue
+            }
             generation = GenerationProgress(
                 planId: planId,
                 status: response.plan.generationStatus,

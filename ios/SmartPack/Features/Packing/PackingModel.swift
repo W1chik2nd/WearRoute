@@ -1,12 +1,11 @@
 import Foundation
 
 /// Packing screen state. Every packing rule lives on the server (AGENTS.md
-/// §3): this only holds the slider value, the ticked-off items, and whatever
-/// plan came back.
+/// §3): this only holds the slider value and whatever plan came back. Ticked
+/// items are part of that plan, stored per trip on the server.
 @Observable
 @MainActor
 final class PackingModel {
-    private static let checkedKey = "smartpack_packing_checked"
     private static let balanceKey = "smartpack_packing_balance"
 
     /// 0 = pack lightest · 100 = most outfit variety.
@@ -18,10 +17,6 @@ final class PackingModel {
     private(set) var loading = true
     private(set) var error: String?
 
-    /// Ticked items, keyed by item id. Local only — the checklist is a
-    /// don't-forget aid, not server state.
-    private(set) var checked: [String: Bool]
-
     private let tripPlanId: String
     private var reloadTask: Task<Void, Never>?
 
@@ -29,17 +24,32 @@ final class PackingModel {
         self.tripPlanId = tripPlanId
         let stored = UserDefaults.standard.object(forKey: Self.balanceKey) as? Double
         balance = stored ?? 50
-        checked = UserDefaults.standard.dictionary(forKey: Self.checkedKey) as? [String: Bool] ?? [:]
     }
 
-    var packedCount: Int { checked.values.filter { $0 }.count }
-    var totalItems: Int { plan?.totalItems ?? 0 }
+    /// Progress is computed by the server over the items currently shown, so
+    /// ticks from another trip or a hidden row never inflate it.
+    var packedCount: Int { plan?.packedCount ?? 0 }
+    var totalItems: Int { plan?.totalCount ?? 0 }
 
-    func isChecked(_ id: String) -> Bool { checked[id] ?? false }
+    func isChecked(_ id: String) -> Bool { plan?.checked.contains(id) ?? false }
 
     func toggle(_ id: String) {
-        checked[id] = !isChecked(id)
-        UserDefaults.standard.set(checked, forKey: Self.checkedKey)
+        reloadTask?.cancel()
+        let requested = balance
+        let checked = !isChecked(id)
+        reloadTask = Task {
+            do {
+                plan = try await APIClient.shared.setPackingCheck(
+                    tripPlanId: tripPlanId, itemId: id, checked: checked, balance: requested
+                ).plan
+                error = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.error = error.localizedDescription
+            }
+        }
     }
 
     /// Debounces the slider so dragging does not fire a request per pixel.

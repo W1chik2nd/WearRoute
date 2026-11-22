@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getPackingPlan, type PackingPlan } from "../api";
+import { getPackingPlan, setPackingCheck, type PackingPlan } from "../api";
 import { useLang } from "../i18n/useLang";
 import PackingLayout from "./PackingListView";
 
@@ -36,19 +36,8 @@ export default function PackingList({ tripPlanId, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Ticked-off items, keyed by item/essential id. Purely local UI state — the
-  // checklist is a "don't forget" aid, not persisted server data (US 7.1).
-  const [checked, setChecked] = useState<Record<string, boolean>>(() => {
-    try {
-      return JSON.parse(sessionStorage.getItem("wearroute_packing_checked") ?? "{}");
-    } catch {
-      return {};
-    }
-  });
-
-  useEffect(() => {
-    sessionStorage.setItem("wearroute_packing_checked", JSON.stringify(checked));
-  }, [checked]);
+  // Ticked items come back with the plan: they are stored per trip on the
+  // server, so they survive a closed tab and match the iOS app (US 7.1).
   useEffect(() => {
     sessionStorage.setItem("wearroute_packing_balance", String(balance));
   }, [balance]);
@@ -74,20 +63,25 @@ export default function PackingList({ tripPlanId, onBack }: Props) {
       });
   }, [debouncedBalance, tripPlanId]);
 
-  const totalItems = useMemo(
-    () =>
-      plan ? plan.categories.reduce((n, c) => n + c.items.length, 0) : 0,
+  const checked = useMemo(
+    () => Object.fromEntries((plan?.checked ?? []).map((id) => [id, true])),
     [plan]
   );
 
-  function toggle(id: string) {
-    setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+  function toggle(itemId: string) {
+    if (!plan) return;
+    const id = ++reqId.current;
+    setPackingCheck(tripPlanId, itemId, !checked[itemId], debouncedBalance)
+      .then(({ plan: updated }) => {
+        if (id !== reqId.current) return;
+        setPlan(updated);
+        setError(null);
+      })
+      .catch((err) => {
+        if (id !== reqId.current) return;
+        setError(err instanceof Error ? err.message : t("pkLoadFailed"));
+      });
   }
-
-  const packedCount = useMemo(
-    () => Object.values(checked).filter(Boolean).length,
-    [checked]
-  );
 
   return (
     <PackingLayout
@@ -98,8 +92,8 @@ export default function PackingList({ tripPlanId, onBack }: Props) {
       error={error}
       checked={checked}
       onToggle={toggle}
-      totalItems={totalItems}
-      packedCount={packedCount}
+      totalItems={plan?.totalCount ?? 0}
+      packedCount={plan?.packedCount ?? 0}
       onBack={onBack}
     />
   );

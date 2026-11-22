@@ -18,6 +18,7 @@ import {
   dashboardTrips, formatDashboardClock, formatTripDates,
   greetingKey, isDashboardDaytime, tripAfterDeletionId, weatherIconPath,
 } from "../lib/trip-dashboard";
+import { localIsoDate } from "../lib/local-date";
 
 type Props = {
   user: User;
@@ -115,12 +116,11 @@ export default function Home({
     }
     let active = true;
     setTodayOutfit(null);
-    getOutfitPlan(selectedTrip.id)
+    getOutfitPlan(selectedTrip.id, localIsoDate())
       .then(({ plan }) => {
         if (!active) return;
-        const today = new Date().toISOString().slice(0, 10);
         setTodayOutfit(
-          plan.days.find((day) => day.date === today) ?? plan.days[0] ?? null
+          plan.days.find((day) => day.date === localIsoDate()) ?? plan.days[0] ?? null
         );
       })
       .catch(() => {

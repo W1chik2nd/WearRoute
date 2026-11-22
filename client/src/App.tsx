@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import {
   me,
   setToken,
+  getToken,
   logout,
+  deleteWardrobeItem,
+  ApiError,
+  SESSION_EXPIRED_EVENT,
   listTripPlans,
   type AssistantClientAction,
   type AssistantPage,
@@ -26,6 +30,7 @@ import Profile from "./pages/Profile";
 import OutfitOverview from "./pages/OutfitOverview";
 import TripWeather from "./pages/TripWeather";
 import ChatWidget from "./components/ChatWidget";
+import { confirmDeleteMessage } from "./i18n/dynamic-strings";
 
 type Route =
   | "landing"
@@ -67,21 +72,46 @@ function Shell() {
     setRoute("outfit");
   };
   const [retryPlan, setRetryPlan] = useState<TripPlan | null>(null);
+  // Bumped after the assistant deletes an item so an open wardrobe reloads.
+  const [wardrobeVersion, setWardrobeVersion] = useState(0);
   const [weatherTripPlanId, setWeatherTripPlanId] = useState<string | null>(null);
 
-  useEffect(() => {
-    // 手机上传页不需要登录态,跳过 me() 免得白等一次请求。
-    if (uploadToken) {
-      setBooting(false);
-      return;
-    }
+  // A stored session the backend could not confirm because it was
+  // unreachable (offline, or the free-tier server still waking up).
+  const [unreachable, setUnreachable] = useState(false);
+
+  function restoreSession() {
     me()
       .then(({ user }) => {
         setUser(user);
+        setUnreachable(false);
         setRoute("home");
       })
-      .catch(() => setToken(null))
+      .catch((error) => {
+        // Only a 401 means the session is gone (request() already cleared
+        // it). Dropping the token on a network error signed people out after
+        // every cold start.
+        setUnreachable(error instanceof ApiError && error.status === null);
+      })
       .finally(() => setBooting(false));
+  }
+
+  useEffect(() => {
+    // 手机上传页不需要登录态,跳过 me() 免得白等一次请求。
+    if (uploadToken || !getToken()) {
+      setBooting(false);
+      return;
+    }
+    restoreSession();
+  }, []);
+
+  useEffect(() => {
+    const onExpired = () => {
+      setUser(null);
+      setRoute("login");
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
   }, []);
 
   // This app uses in-memory routes, so the browser does not reset scroll as
@@ -127,17 +157,20 @@ function Shell() {
         else setRoute(assistantRoutes[action.page]);
       }
       if (action.type === "tripCreated") setRoute("home");
+      if (action.type === "confirmDeleteWardrobeItem") {
+        if (window.confirm(confirmDeleteMessage(lang, action.title))) {
+          void deleteWardrobeItem(action.id)
+            .then(() => setWardrobeVersion((v) => v + 1))
+            .catch((error) => window.alert(error instanceof Error ? error.message : String(error)));
+        }
+      }
       if (action.type === "packingChanged") {
-        const current = JSON.parse(
-          sessionStorage.getItem("wearroute_packing_checked") ?? "{}"
-        ) as Record<string, boolean>;
-        for (const id of action.checked ?? []) current[id] = true;
-        for (const id of action.unchecked ?? []) current[id] = false;
-        sessionStorage.setItem("wearroute_packing_checked", JSON.stringify(current));
+        // The server already stored the ticks; just show that checklist.
         if (action.balance !== undefined) {
           sessionStorage.setItem("wearroute_packing_balance", String(action.balance));
         }
-        openLatestPackingPlan();
+        setPackingTripPlanId(action.tripPlanId);
+        setRoute("packing");
       }
     }
   }
@@ -165,6 +198,26 @@ function Shell() {
   );
 
   if (booting) return null;
+
+  if (unreachable) {
+    return (
+      <main className="auth-page" aria-live="polite">
+        <section className="auth-card">
+          <h1>{t("unreachableTitle")}</h1>
+          <p>{t("unreachableBody")}</p>
+          <button
+            className="btn-primary"
+            onClick={() => {
+              setBooting(true);
+              restoreSession();
+            }}
+          >
+            {t("unreachableRetry")}
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   // 手机扫码进来的上传页:免登录,优先于其他路由。
   if (uploadToken) {
@@ -302,7 +355,7 @@ function Shell() {
         />
       )}
       {route === "wardrobe" && user && (
-        <Wardrobe onBack={() => setRoute("home")} />
+        <Wardrobe key={wardrobeVersion} onBack={() => setRoute("home")} />
       )}
       {route === "profile" && user && (
         <Profile

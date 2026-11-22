@@ -6,10 +6,40 @@ import {
   type AssistantActionContext,
 } from "./assistant-actions.ts";
 
-function context(): AssistantActionContext & { savedTrips: unknown[]; addedItems: unknown[] } {
+function context(): AssistantActionContext & {
+  savedTrips: unknown[];
+  addedItems: unknown[];
+  checks: Map<string, boolean>;
+} {
   const savedTrips: unknown[] = [];
   const addedItems: unknown[] = [];
+  const checks = new Map<string, boolean>();
   return {
+    checks,
+    geocode: async (name) =>
+      name === "Nowhere"
+        ? null
+        : { placeName: "京都市", placeDetail: "日本 京都府", lat: 35.0116, lon: 135.7681 },
+    startTripGeneration: async (plan) => {
+      savedTrips.push(plan);
+      return { id: "trip-1" };
+    },
+    packingPlans: {
+      save: () => { throw new Error("unused"); },
+      get: () => null,
+      latest: () => ({
+        tripPlanId: "trip-1",
+        tripDays: 2,
+        packing: {
+          summary: "", summaryEn: "", categories: [],
+          essentials: [{ id: "passport", label: "护照", labelEn: "Passport" }],
+        },
+      }),
+      checks: () => [],
+      setChecks: (_userId, _tripPlanId, ids, checked) => {
+        for (const id of ids) checks.set(id, checked);
+      },
+    },
     userId: "user-1",
     scenarioIds: new Set(["travel", "business"]),
     savedTrips,
@@ -19,10 +49,10 @@ function context(): AssistantActionContext & { savedTrips: unknown[]; addedItems
       list: () => [],
       add: (_userId, item) => {
         addedItems.push(item);
-        return { id: "item-1", title: item.title, category: item.category, subtype: "", count: 1, colors: [], fit: "", material: "", seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "now" };
+        return { id: "item-1", title: item.title, titleEn: "", category: item.category, subtype: "", count: 1, colors: [], fit: "", material: "", seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "now" };
       },
       update: (_userId, id, patch) => id === "item-1"
-        ? { id, title: String(patch.title ?? "Black tee"), category: "top", subtype: "", count: 1, colors: [], fit: "", material: "", seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "now" }
+        ? { id, title: String(patch.title ?? "Black tee"), titleEn: "", category: "top", subtype: "", count: 1, colors: [], fit: "", material: "", seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "now" }
         : null,
       remove: (_userId, id) => id === "item-1",
       photoPath: () => null,
@@ -77,15 +107,17 @@ test("assistant actions add wardrobe items and valid trip plans", async () => {
       plan: {
         scenario: "travel",
         placeName: "Kyoto",
-        lat: 35.0116,
-        lon: 135.7681,
         startDate: "2026-09-10",
         endDate: "2026-09-13",
       },
     },
   ], ctx);
   assert.equal(ctx.addedItems.length, 1);
-  assert.equal(ctx.savedTrips.length, 1);
+  // Saved through the generation path with geocoded, not model-guessed, coordinates.
+  assert.deepEqual(ctx.savedTrips, [{
+    scenario: "travel", placeName: "京都市", placeDetail: "日本 京都府",
+    lat: 35.0116, lon: 135.7681, startDate: "2026-09-10", endDate: "2026-09-13", notes: "",
+  }]);
   assert.deepEqual(result.actions, [
     { type: "wardrobeChanged" },
     { type: "tripCreated" },
@@ -118,30 +150,51 @@ test("assistant can control packing checklist state", async () => {
   const ctx = context();
   const parsed = parseAssistantEnvelope(JSON.stringify({
     reply: "Marking it packed.",
-    actions: [{ type: "packingChecklist", checked: ["passport"], balance: 20 }],
+    actions: [{ type: "packingChecklist", checked: ["passport", "made-up-id"], balance: 20 }],
   }));
   const result = await executeAssistantActions(parsed.actions, ctx);
   assert.deepEqual(result.actions, [{
     type: "packingChanged",
-    checked: ["passport"],
+    tripPlanId: "trip-1",
     balance: 20,
   }]);
+  // Stored on the server, and ids the model invented are ignored.
+  assert.deepEqual([...ctx.checks], [["passport", true]]);
 });
 
 test("assistant refuses invalid trip mutations", async () => {
   const ctx = context();
-  const result = await executeAssistantActions([{
-    type: "createTripPlan",
-    plan: {
-      scenario: "unknown",
-      placeName: "Nowhere",
-      lat: 200,
-      lon: 0,
-      startDate: "2026-02-31",
-      endDate: "2026-01-01",
+  const result = await executeAssistantActions([
+    {
+      type: "createTripPlan",
+      plan: { scenario: "unknown", placeName: "Kyoto", startDate: "2026-02-31", endDate: "2026-01-01" },
     },
-  }], ctx);
+    {
+      type: "createTripPlan",
+      plan: { scenario: "travel", placeName: "Nowhere", startDate: "2026-09-10", endDate: "2026-09-11" },
+    },
+  ], ctx);
   assert.equal(ctx.savedTrips.length, 0);
   assert.deepEqual(result.actions, []);
-  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors.length, 2);
+  assert.match(result.errors[1], /Could not find "Nowhere"/);
+});
+
+test("assistant deletions wait for the user's confirmation", async () => {
+  const ctx = context();
+  let removed = false;
+  ctx.wardrobe = {
+    ...ctx.wardrobe,
+    list: () => [{ id: "item-1", title: "Black tee", titleEn: "", category: "top", subtype: "", count: 1, colors: [], fit: "", material: "", seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "now" }],
+    remove: () => { removed = true; return true; },
+  };
+  const result = await executeAssistantActions([
+    { type: "deleteWardrobeItem", id: "item-1" },
+    { type: "deleteWardrobeItem", id: "missing" },
+  ], ctx);
+  assert.equal(removed, false, "nothing is deleted on the model's word");
+  assert.deepEqual(result.actions, [
+    { type: "confirmDeleteWardrobeItem", id: "item-1", title: "Black tee" },
+  ]);
+  assert.deepEqual(result.errors, ["Wardrobe item not found."]);
 });

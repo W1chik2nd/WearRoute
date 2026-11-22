@@ -18,6 +18,7 @@ export type { WardrobeItem } from "../shared/wardrobe-types.ts";
 /** 新增单品时的入参(照片是可选的 data URL)。 */
 export type NewItem = {
   title: string;
+  titleEn?: string;
   category: string;
   subtype?: string;
   count?: number;
@@ -33,17 +34,48 @@ export type NewItem = {
 /** 允许编辑的字段。 */
 export type ItemPatch = Partial<{
   title: string;
+  titleEn: string;
   category: string;
   subtype: string;
   count: number;
+  colors: string[];
   fit: string;
   material: string;
+  seasons: string[];
+  styleTags: string[];
   details: string;
 }>;
+
+/**
+ * Column values for a patch. Colours, seasons and style tags drive outfit
+ * rendering and planning, so a misrecognised colour must be correctable too.
+ * Renaming the Chinese title without a new English one clears the stale
+ * translation rather than leaving two names that disagree.
+ */
+export function patchColumns(patch: ItemPatch): Record<string, string | number> {
+  const columns: Record<string, string | number> = {};
+  if (patch.title !== undefined) {
+    columns.title = patch.title;
+    columns.title_en = patch.titleEn ?? "";
+  } else if (patch.titleEn !== undefined) {
+    columns.title_en = patch.titleEn;
+  }
+  if (patch.category !== undefined) columns.category = patch.category;
+  if (patch.subtype !== undefined) columns.subtype = patch.subtype;
+  if (patch.count !== undefined) columns.count = patch.count;
+  if (patch.colors !== undefined) columns.colors = JSON.stringify(patch.colors);
+  if (patch.fit !== undefined) columns.fit = patch.fit;
+  if (patch.material !== undefined) columns.material = patch.material;
+  if (patch.seasons !== undefined) columns.seasons = JSON.stringify(patch.seasons);
+  if (patch.styleTags !== undefined) columns.style_tags = JSON.stringify(patch.styleTags);
+  if (patch.details !== undefined) columns.details = patch.details;
+  return columns;
+}
 
 type Row = {
   id: string;
   title: string;
+  title_en: string;
   category: string;
   subtype: string;
   count: number;
@@ -70,6 +102,7 @@ function toItem(r: Row): WardrobeItem {
   return {
     id: r.id,
     title: r.title,
+    titleEn: r.title_en ?? "",
     category: r.category,
     subtype: r.subtype ?? "",
     count: r.count,
@@ -135,6 +168,11 @@ export function createWardrobeStore(
   } catch {
     // 列已存在,正常情况。
   }
+  try {
+    db.exec(`ALTER TABLE wardrobe_items ADD COLUMN title_en TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // 列已存在。
+  }
   mkdirSync(photoDir, { recursive: true });
 
   /** data:image/jpeg;base64,xxx → 落盘,返回文件名。 */
@@ -170,13 +208,14 @@ export function createWardrobeStore(
         : null;
       db.prepare(
         `INSERT INTO wardrobe_items
-           (id, user_id, title, category, subtype, count, colors, fit, material,
-            seasons, style_tags, details, photo_file)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           (id, user_id, title, title_en, category, subtype, count, colors, fit,
+            material, seasons, style_tags, details, photo_file)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         userId,
         item.title,
+        item.titleEn ?? "",
         item.category,
         item.subtype ?? "",
         item.count ?? 1,
@@ -194,14 +233,7 @@ export function createWardrobeStore(
     update(userId, id, patch) {
       if (!findRow(userId, id)) return null;
       // 只允许白名单字段,避免把 user_id/photo_file 这类字段改掉。
-      const cols: Record<string, string | number> = {};
-      if (patch.title !== undefined) cols.title = patch.title;
-      if (patch.category !== undefined) cols.category = patch.category;
-      if (patch.subtype !== undefined) cols.subtype = patch.subtype;
-      if (patch.count !== undefined) cols.count = patch.count;
-      if (patch.fit !== undefined) cols.fit = patch.fit;
-      if (patch.material !== undefined) cols.material = patch.material;
-      if (patch.details !== undefined) cols.details = patch.details;
+      const cols = patchColumns(patch);
 
       const keys = Object.keys(cols);
       if (keys.length > 0) {

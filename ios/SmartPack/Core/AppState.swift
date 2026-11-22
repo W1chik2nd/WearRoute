@@ -26,11 +26,19 @@ enum Route: Hashable {
 /// account exists.
 enum AuthPhase: Equatable {
     case booting
+    /// A stored session exists but the backend could not be reached (offline,
+    /// or the free-tier server still waking up). The session is kept.
+    case unreachable
     case landing
     case login
     case register
     case questionnaire(Credentials)
     case authed
+}
+
+struct PendingDeletion: Equatable {
+    let id: String
+    let title: String
 }
 
 /// Session and navigation state for the whole app.
@@ -43,6 +51,10 @@ final class AppState {
     var path: [Route] = []
     /// Set when the assistant asks for a scenario-seeded trip setup.
     var pendingScenario: String?
+    /// A deletion the assistant proposed, waiting for the user's confirmation.
+    var pendingDeletion: PendingDeletion?
+    /// Bumped after a confirmed deletion so an open wardrobe reloads.
+    private(set) var wardrobeRevision = 0
 
     private let api = APIClient.shared
 
@@ -57,10 +69,34 @@ final class AppState {
         do {
             user = try await api.me().user
             phase = .authed
-        } catch {
+        } catch let error as APIClient.APIError where error.isUnauthorized {
             TokenStore.token = nil
             phase = .landing
+        } catch {
+            // Only a 401 means the session is gone. Signing the user out on a
+            // network error forced a fresh login after every offline launch.
+            phase = .unreachable
         }
+    }
+
+    /// Runs only after the user confirmed in the dialog RootView shows.
+    func confirmPendingDeletion() async {
+        guard let deletion = pendingDeletion else { return }
+        pendingDeletion = nil
+        if (try? await api.deleteWardrobeItem(id: deletion.id)) != nil {
+            wardrobeRevision += 1
+        }
+    }
+
+    /// Any signed-in request answered 401: the server no longer knows this
+    /// session (expired or signed out elsewhere), so go back to sign-in once.
+    func sessionExpired() {
+        guard phase == .authed else { return }
+        TokenStore.token = nil
+        user = nil
+        primarySection = .today
+        path = []
+        phase = .login
     }
 
     func signedIn(_ response: AuthResponse) {
@@ -103,8 +139,15 @@ final class AppState {
                 await navigate(to: page, scenario: scenario)
             case .tripCreated:
                 popToRoot()
-            case .packingChanged:
-                await openLatestPacking()
+            case .packingChanged(let tripPlanId, _):
+                if let tripPlanId {
+                    selectPrimarySection(.trips)
+                    push(.packing(tripPlanId: tripPlanId))
+                } else {
+                    await openLatestPacking()
+                }
+            case .confirmDeleteWardrobeItem(let id, let title):
+                pendingDeletion = PendingDeletion(id: id, title: title)
             case .unsupported:
                 break
             }

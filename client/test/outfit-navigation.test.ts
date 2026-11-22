@@ -14,7 +14,7 @@ const outfitTypes = readFileSync(new URL("../../shared/outfit-types.ts", import.
 test("today outfit tile opens the outfit overview route", () => {
   assert.match(home, /type="button"\s+className="today-outfit"/);
   assert.match(home, /onClick=\{\(\) => onOpenOutfit\(selectedTrip\.id\)\}/);
-  assert.match(home, /getOutfitPlan\(selectedTrip\.id\)/);
+  assert.match(home, /getOutfitPlan\(selectedTrip\.id, localIsoDate\(\)\)/);
   assert.match(app, /const openOutfit = \(tripPlanId\?: string\)/);
   assert.match(app, /onOpenOutfit=\{openOutfit\}/);
   assert.match(app, /route === "outfit"/);

@@ -7,6 +7,7 @@ import {
   inTransaction,
   type PostgresQueryable,
 } from "./postgres.ts";
+import { SESSION_TTL_MS } from "./account-routes.ts";
 
 type SqliteValue = string | number | bigint | Buffer | null;
 type SqliteRow = Record<string, SqliteValue>;
@@ -23,6 +24,20 @@ const pool = await createPostgresPool(connectionString);
 
 function sqliteRows(table: string, columns: string[]): SqliteRow[] {
   return sqlite.prepare(`SELECT ${columns.join(", ")} FROM ${table}`).all() as SqliteRow[];
+}
+
+/**
+ * The columns of `wanted` this SQLite file actually has. Local databases
+ * created by older versions lack newer columns (title_en, expires_at) and
+ * tables (packing_checks); those fall back to the Postgres defaults.
+ */
+function presentColumns(table: string, wanted: string[]): string[] {
+  const present = new Set(
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+      (column) => column.name
+    )
+  );
+  return wanted.filter((column) => present.has(column));
 }
 
 async function upsert(
@@ -50,6 +65,8 @@ async function copyTable(
   columns: string[],
   conflictColumn: string
 ): Promise<number> {
+  columns = presentColumns(table, columns);
+  if (columns.length === 0) return 0;
   const values = sqliteRows(table, columns);
   for (const value of values) {
     await upsert(
@@ -73,13 +90,13 @@ const counts = await inTransaction(pool, async (client) => {
   ];
   migrated.users = await copyTable(client, "users", userColumns, "id");
 
-  const sessionColumns = ["token", "user_id", "created_at"];
+  const sessionColumns = ["token", "user_id", "created_at", "expires_at"];
   migrated.sessions = await copyTable(client, "sessions", sessionColumns, "token");
 
-  const wardrobeColumns = [
-    "id", "user_id", "title", "category", "subtype", "count", "colors",
+  const wardrobeColumns = presentColumns("wardrobe_items", [
+    "id", "user_id", "title", "title_en", "category", "subtype", "count", "colors",
     "fit", "material", "seasons", "style_tags", "details", "created_at",
-  ];
+  ]);
   const wardrobeRows = sqliteRows("wardrobe_items", [
     ...wardrobeColumns,
     "photo_file",
@@ -107,6 +124,10 @@ const counts = await inTransaction(pool, async (client) => {
     );
   }
   migrated.wardrobe_items = wardrobeRows.length;
+  // Sessions copied from an older file have no expiry yet.
+  await client.query(`UPDATE sessions SET expires_at = $1 WHERE expires_at IS NULL`, [
+    Date.now() + SESSION_TTL_MS,
+  ]);
 
   migrated.trip_plans = await copyTable(
     client,
@@ -152,6 +173,12 @@ const counts = await inTransaction(pool, async (client) => {
     "generated_packing_plans",
     ["trip_plan_id", "user_id", "trip_days", "plan_json", "created_at"],
     "trip_plan_id"
+  );
+  migrated.packing_checks = await copyTable(
+    client,
+    "packing_checks",
+    ["trip_plan_id", "user_id", "item_id"],
+    "trip_plan_id, item_id"
   );
   return migrated;
 });

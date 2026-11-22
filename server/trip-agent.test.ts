@@ -114,6 +114,55 @@ test("backend identifies critical blank text but allows wardrobe gaps", () => {
   );
 });
 
+function ownedItem(id: string, title: string, category: string) {
+  return {
+    id, title, category, subtype: "", count: 1, colors: [], fit: "", material: "",
+    seasons: [], styleTags: [], details: "", hasPhoto: false, createdAt: "2026-08-01",
+  };
+}
+
+test("an owned piece worn but not packed is added to packing, not marked as a gap", () => {
+  const plan = generatedPlan();
+  plan.days[0].outfit = [
+    { label: "蓝色衬衫", labelEn: "Blue shirt", wardrobeItemId: "owned-shirt", kind: "top" },
+    { label: "黑色西裤", labelEn: "Black trousers", wardrobeItemId: "owned-trousers", kind: "bottom" },
+  ];
+  const normalized = normalizeGeneratedTrip(plan, ["2026-09-01"], [
+    ownedItem("owned-shirt", "蓝色衬衫", "衬衫"),
+    ownedItem("owned-trousers", "黑色西裤", "裤装"),
+  ]);
+  assert.equal(normalized.days[0].outfit[1].wardrobeItemId, "owned-trousers");
+  const bottoms = normalized.packing.categories.find((c) => c.id === "bottoms");
+  assert.deepEqual(bottoms?.items.map((i) => [i.wardrobeItemId, i.priority, i.daysUsed]), [
+    ["owned-trousers", "core", [1]],
+  ]);
+  assert.equal(bottoms?.items[0].labelEn, "Black trousers");
+});
+
+test("packing days come from the outfits, not from the model's claim", () => {
+  const plan = generatedPlan();
+  const day2 = structuredClone(plan.days[0]);
+  day2.date = "2026-09-02";
+  day2.outfit = [{ label: "衬衫", labelEn: "Shirt", wardrobeItemId: "owned-shirt", kind: "top" }];
+  plan.days[0].outfit = [{ label: "长裤", labelEn: "Trousers", kind: "bottom" }];
+  plan.days.push(day2);
+  const shirtRow = plan.packing.categories[0].items[0];
+  shirtRow.daysUsed = [1];
+  shirtRow.priority = "optional";
+  shirtRow.reuse = 3;
+  // The model lists the same owned shirt twice.
+  plan.packing.categories[0].items.push({ ...shirtRow });
+
+  const normalized = normalizeGeneratedTrip(plan, ["2026-09-01", "2026-09-02"], [
+    ownedItem("owned-shirt", "蓝色衬衫", "衬衫"),
+  ]);
+  const rows = normalized.packing.categories[0].items;
+  assert.equal(rows.length, 1, "duplicate owned rows collapse into one");
+  assert.deepEqual(rows[0].daysUsed, [2]);
+  assert.equal(rows[0].reuse, 1);
+  assert.equal(rows[0].priority, "core", "worn pieces survive the leanest slider setting");
+});
+
 test("backend repairs safe empty notes, risks, labels, and photo queries", () => {
   const plan = generatedPlan();
   plan.departLabel = "";

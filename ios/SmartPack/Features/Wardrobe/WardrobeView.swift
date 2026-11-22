@@ -11,6 +11,7 @@ import SwiftUI
 /// directly, which is exactly what the web client does on a mobile browser.
 struct WardrobeView: View {
     @Environment(\.lang) private var lang
+    @Environment(AppState.self) private var app
 
     @State private var items: [WardrobeItem] = []
     @State private var pending: [PendingItem] = []
@@ -56,7 +57,7 @@ struct WardrobeView: View {
 
             grid
         }
-        .task { await load() }
+        .task(id: app.wardrobeRevision) { await load() }
         .fullScreenCover(isPresented: $cameraOpen) {
             CameraPicker { image in
                 Task { await recognize(image) }
@@ -74,7 +75,7 @@ struct WardrobeView: View {
             Task { await loadFromLibrary(libraryItem) }
         }
         .confirmationDialog(
-            confirmingDelete.map { Strings.confirmDelete(lang, title: $0.title) } ?? "",
+            confirmingDelete.map { Strings.confirmDelete(lang, title: $0.displayTitle(lang)) } ?? "",
             isPresented: Binding(get: { confirmingDelete != nil }, set: { if !$0 { confirmingDelete = nil } }),
             titleVisibility: .visible
         ) {

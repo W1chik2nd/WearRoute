@@ -17,6 +17,9 @@ struct TripWeatherView: View {
             if let data {
                 heading(data.trip)
                 summary(data)
+                if let changes = data.changes, !changes.isEmpty {
+                    changeNotice(changes)
+                }
                 forecast(data)
             } else if failed {
                 VStack(alignment: .leading, spacing: Theme.space2) {
@@ -114,6 +117,23 @@ struct TripWeatherView: View {
         .background(fill)
     }
 
+    private func changeNotice(_ changes: [WeatherChange]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.space1) {
+            Text(Strings.tripWeatherChangesTitle(lang))
+                .font(Theme.heavy(16))
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(changes, id: \.self) { change in
+                Text(Strings.weatherChange(change, date: date(change.date), lang))
+                    .font(Theme.bold(14))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(Theme.space2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .bauhausCard(fill: Theme.yellow)
+        .accessibilityElement(children: .combine)
+    }
+
     private func forecast(_ data: TripWeatherResponse) -> some View {
         VStack(spacing: 0) {
             HStack {
@@ -134,8 +154,9 @@ struct TripWeatherView: View {
             if data.forecast.available {
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 0) {
-                        ForEach(Array(data.forecast.days.enumerated()), id: \.element.id) { index, day in
-                            ForecastDayCard(day: day, index: index)
+                        ForEach(data.forecast.days) { day in
+                            // Numbered from the date, so a gap in provider data cannot shift it.
+                            ForecastDayCard(day: day, dayNumber: TripDate.nights(from: data.trip.startDate, to: day.date) + 1)
                                 .containerRelativeFrame(.horizontal)
                                 .scrollTransition(.animated.threshold(.visible(0.85))) { content, phase in
                                     content.opacity(phase.isIdentity ? 1 : 0.72)
@@ -146,6 +167,14 @@ struct TripWeatherView: View {
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
+                if data.forecast.days.contains(where: \.isTypical) {
+                    Rule(width: Theme.hairline)
+                    Text(Strings.tripWeatherTypicalHint(lang))
+                        .font(Theme.bold(13))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(Theme.space2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             } else {
                 HStack(alignment: .top, spacing: Theme.space2) {
                     Text("!")
@@ -181,14 +210,22 @@ struct TripWeatherView: View {
 
 private struct ForecastDayCard: View {
     let day: ForecastDay
-    let index: Int
+    let dayNumber: Int
 
     @Environment(\.lang) private var lang
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text(Strings.dayNumber(index + 1, lang)).font(Theme.heavy(14))
+                Text(Strings.dayNumber(dayNumber, lang)).font(Theme.heavy(14))
+                if day.isTypical {
+                    Text(Strings.tripWeatherTypical(lang))
+                        .font(Theme.heavy(11))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.white)
+                        .overlay(Rectangle().strokeBorder(Theme.black, lineWidth: 1.5))
+                }
                 Spacer()
                 Text(TripDate.format(day.date, lang, style: .weekdayDay))
                     .font(Theme.bold(12))
@@ -219,7 +256,7 @@ private struct ForecastDayCard: View {
                 metric(Strings.tripWeatherHigh(lang), "\(Int(day.maxTempC.rounded()))°C")
                 metric(Strings.tripWeatherLow(lang), "\(Int(day.minTempC.rounded()))°C")
                 metric(Strings.tripWeatherRain(lang), "\(Int(day.precipitationProbability.rounded()))%")
-                metric(Strings.tripWeatherUV(lang), String(format: "%.1f", day.uvIndex))
+                metric(Strings.tripWeatherUV(lang), day.uvIndex.map { String(format: "%.1f", $0) } ?? "—")
                 metric(Strings.tripWeatherWind(lang), "\(Int(day.maxWindKph.rounded())) km/h")
             }
             .padding(Theme.space2)
