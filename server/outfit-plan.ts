@@ -7,6 +7,7 @@ import type { TripPlan } from "./trip-plan.ts";
 import type { BilingualItem } from "./trip-agent-types.ts";
 import type { WardrobeItem } from "./wardrobe.ts";
 import { DEFAULT_COORDS } from "./weather.ts";
+import { outfitKindOf, wardrobeKind } from "./wardrobe-kind.ts";
 import {
   descriptionPattern,
   descriptionSleeve,
@@ -96,19 +97,8 @@ function piece(
   };
 }
 
-const CATEGORY_WORDS: Record<OutfitPieceKind, string[]> = {
-  top: ["top", "shirt", "tee", "blouse", "sweater", "jacket", "coat", "上衣", "衬衫", "外套"],
-  bottom: ["bottom", "pants", "trouser", "jeans", "skirt", "shorts", "下装", "裤", "裙"],
-  shoes: ["shoe", "sneaker", "loafer", "boot", "sandal", "鞋", "靴"],
-  accessory: ["accessory", "bag", "handbag", "hat", "cap", "scarf", "glasses", "sunglass", "watch", "jewel", "necklace", "配饰", "包", "帽", "围巾", "眼镜", "手表", "首饰", "项链"],
-};
-
 function kindOf(item: WardrobeItem): OutfitPieceKind | null {
-  const text = `${item.category} ${item.subtype}`.toLowerCase();
-  for (const kind of ["top", "bottom", "shoes", "accessory"] as const) {
-    if (CATEGORY_WORDS[kind].some((word) => text.includes(word))) return kind;
-  }
-  return null;
+  return outfitKindOf(wardrobeKind(item));
 }
 
 function accessoryStyleOf(item: WardrobeItem): AccessoryStyle | null {
@@ -170,7 +160,7 @@ function fromWardrobe(item: WardrobeItem, kind: OutfitPieceKind): Candidate {
     id: item.id,
     kind,
     label: item.title,
-    labelEn: item.title,
+    labelEn: item.titleEn || item.title,
     tone: descriptionTone(item.title, item.colors.join(" "), item.details),
     pattern: descriptionPattern(item.title, item.styleTags.join(" "), item.details),
     sleeve: descriptionSleeve(kind, item.title, item.subtype, item.details),
@@ -184,11 +174,7 @@ function fromWardrobe(item: WardrobeItem, kind: OutfitPieceKind): Candidate {
 }
 
 function kindFromLabel(label: string): OutfitPieceKind {
-  const text = label.toLowerCase();
-  for (const kind of ["top", "bottom", "shoes", "accessory"] as const) {
-    if (CATEGORY_WORDS[kind].some((word) => text.includes(word))) return kind;
-  }
-  return "accessory";
+  return outfitKindOf(wardrobeKind({ category: "", title: label })) ?? "accessory";
 }
 
 /**
@@ -197,10 +183,7 @@ function kindFromLabel(label: string): OutfitPieceKind {
  * colours or garment types independently.
  */
 export function wardrobeItemVisual(item: WardrobeItem): OutfitPiece {
-  const kind = kindOf(item) ?? kindFromLabel(
-    `${item.title} ${item.category} ${item.subtype}`
-  );
-  return fromWardrobe(item, kind);
+  return fromWardrobe(item, kindOf(item) ?? "accessory");
 }
 
 function agentPiece(
@@ -222,7 +205,7 @@ function agentPiece(
     descriptionTone(recommendation.label, recommendation.labelEn),
     kind === "accessory"
       ? { accessoryStyle: accessoryStyleFromLabel(recommendation.label) }
-      : { garmentStyle: garmentStyleFromLabel(recommendation.label, kind) }
+      : { garmentStyle: garmentStyleFromLabel(recommendation.label, kind) ?? undefined }
   );
   return fallback;
 }

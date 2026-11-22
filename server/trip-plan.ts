@@ -9,6 +9,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import type { AsyncValue } from "./async-value.ts";
+import type { GeneratedTripPlan } from "./trip-agent-types.ts";
+import type { TripForecast } from "../shared/weather-types.ts";
+import { insertGeneratedItinerary } from "./itinerary-generation.ts";
+import { insertGeneratedPacking } from "./packing-store.ts";
 
 /** 一条行程计划:去哪、什么时候、什么场景。 */
 export type TripPlan = {
@@ -44,25 +48,49 @@ export type NewTripPlan = Omit<
   | "notes"
 > & { notes?: string };
 
+/**
+ * One running generation. The token identifies which worker owns the job; the
+ * lease (epoch ms) is renewed by that worker's heartbeat. A job whose lease
+ * lapses was orphaned by a restart and can be taken over by any instance.
+ */
+export type GenerationLease = { token: string; leaseMs: number };
+export type ExpiredGeneration = { userId: string; planId: string; attempts: number };
+export type CompletedGeneration = {
+  userId: string;
+  planId: string;
+  token: string;
+  scenario: string;
+  tripDays: number;
+  generated: GeneratedTripPlan;
+};
+
 export type TripPlanStore = {
   save: (userId: string, plan: NewTripPlan) => AsyncValue<TripPlan>;
   get: (userId: string, planId: string) => AsyncValue<TripPlan | null>;
   list: (userId: string) => AsyncValue<TripPlan[]>;
-  markGenerating: (userId: string, planId: string) => AsyncValue<void>;
-  markFailed: (userId: string, planId: string, error: string) => AsyncValue<void>;
-  attachItinerary: (userId: string, planId: string, itineraryId: string) => AsyncValue<void>;
+  /** Mark processing and take the lease for a fresh attempt. */
+  startGeneration: (userId: string, planId: string, lease: GenerationLease) => AsyncValue<void>;
+  /** Heartbeat; false when the job was taken over, finished or deleted. */
+  renewGeneration: (planId: string, lease: GenerationLease) => AsyncValue<boolean>;
+  /** Processing jobs whose lease ran out before `now`. */
+  expiredGenerations: (now: number) => AsyncValue<ExpiredGeneration[]>;
+  /** Atomically claim an expired job; false if another instance got it first. */
+  takeOverGeneration: (planId: string, now: number, lease: GenerationLease) => AsyncValue<boolean>;
+  /** Fails the job; with a token, only while that worker still owns it. */
+  markFailed: (userId: string, planId: string, error: string, token?: string) => AsyncValue<void>;
+  /**
+   * Store the itinerary and packing plan and mark the trip completed in one
+   * transaction, only if `token` still owns the job. False means the result
+   * is stale (trip deleted or job taken over) and was discarded.
+   */
+  completeGeneration: (result: CompletedGeneration) => AsyncValue<boolean>;
+  /** The forecast the completed plan was generated against, if recorded. */
+  weatherSnapshot: (userId: string, planId: string) => AsyncValue<TripForecast | null>;
   remove: (userId: string, planId: string) => AsyncValue<boolean>;
 };
 
-export type SyncTripPlanStore = {
-  save: (userId: string, plan: NewTripPlan) => TripPlan;
-  get: (userId: string, planId: string) => TripPlan | null;
-  list: (userId: string) => TripPlan[];
-  markGenerating: (userId: string, planId: string) => void;
-  markFailed: (userId: string, planId: string, error: string) => void;
-  attachItinerary: (userId: string, planId: string, itineraryId: string) => void;
-  remove: (userId: string, planId: string) => boolean;
-};
+type Sync<T> = { [K in keyof T]: T[K] extends (...args: infer A) => AsyncValue<infer R> ? (...args: A) => R : T[K] };
+export type SyncTripPlanStore = Sync<TripPlanStore>;
 
 type Row = {
   id: string;
@@ -137,18 +165,28 @@ export function createTripPlanStore(db: DatabaseSync): SyncTripPlanStore {
   if (!existing.has("generation_error")) {
     db.exec(`ALTER TABLE trip_plans ADD COLUMN generation_error TEXT`);
   }
+  if (!existing.has("generation_token")) {
+    db.exec(`ALTER TABLE trip_plans ADD COLUMN generation_token TEXT`);
+  }
+  if (!existing.has("generation_lease_until")) {
+    db.exec(`ALTER TABLE trip_plans ADD COLUMN generation_lease_until INTEGER`);
+  }
+  if (!existing.has("weather_snapshot")) {
+    db.exec(`ALTER TABLE trip_plans ADD COLUMN weather_snapshot TEXT`);
+  }
+  if (!existing.has("generation_attempts")) {
+    db.exec(
+      `ALTER TABLE trip_plans ADD COLUMN generation_attempts INTEGER NOT NULL DEFAULT 0`
+    );
+  }
   db.exec(
     `UPDATE trip_plans SET generation_status = 'completed'
        WHERE itinerary_id IS NOT NULL AND generation_status = 'pending'`
   );
-  // An in-process background call cannot survive a server restart. Surface
-  // that interruption instead of leaving a trip stuck on "processing".
-  db.exec(
-    `UPDATE trip_plans
-        SET generation_status = 'failed',
-            generation_error = 'Generation was interrupted. Please try again.'
-      WHERE generation_status = 'processing'`
-  );
+  // Jobs interrupted by a restart are no longer failed here: their lease
+  // lapses and the job runner (trip-jobs.ts) takes them over. Failing every
+  // processing row on boot also failed jobs another instance was still
+  // running during a rolling deploy.
 
   return {
     save(userId, plan) {
@@ -194,29 +232,107 @@ export function createTripPlanStore(db: DatabaseSync): SyncTripPlanStore {
       return rows.map(toPlan);
     },
 
-    markGenerating(userId, planId) {
+    startGeneration(userId, planId, lease) {
       db.prepare(
         `UPDATE trip_plans
-            SET generation_status = 'processing', generation_error = NULL
+            SET generation_status = 'processing', generation_error = NULL,
+                generation_token = ?, generation_lease_until = ?,
+                generation_attempts = 1
           WHERE id = ? AND user_id = ?`
-      ).run(planId, userId);
+      ).run(lease.token, lease.leaseMs, planId, userId);
     },
 
-    markFailed(userId, planId, error) {
-      db.prepare(
-        `UPDATE trip_plans
-            SET generation_status = 'failed', generation_error = ?
-          WHERE id = ? AND user_id = ?`
-      ).run(error, planId, userId);
+    renewGeneration(planId, lease) {
+      return (
+        db
+          .prepare(
+            `UPDATE trip_plans SET generation_lease_until = ?
+              WHERE id = ? AND generation_status = 'processing'
+                AND generation_token = ?`
+          )
+          .run(lease.leaseMs, planId, lease.token).changes > 0
+      );
     },
 
-    attachItinerary(userId, planId, itineraryId) {
+    expiredGenerations(now) {
+      return (
+        db
+          .prepare(
+            `SELECT id, user_id, generation_attempts FROM trip_plans
+              WHERE generation_status = 'processing'
+                AND (generation_lease_until IS NULL OR generation_lease_until < ?)`
+          )
+          .all(now) as { id: string; user_id: string; generation_attempts: number }[]
+      ).map((row) => ({
+        planId: row.id,
+        userId: row.user_id,
+        attempts: row.generation_attempts,
+      }));
+    },
+
+    takeOverGeneration(planId, now, lease) {
+      return (
+        db
+          .prepare(
+            `UPDATE trip_plans
+                SET generation_token = ?, generation_lease_until = ?,
+                    generation_attempts = generation_attempts + 1
+              WHERE id = ? AND generation_status = 'processing'
+                AND (generation_lease_until IS NULL OR generation_lease_until < ?)`
+          )
+          .run(lease.token, lease.leaseMs, planId, now).changes > 0
+      );
+    },
+
+    markFailed(userId, planId, error, token) {
       db.prepare(
         `UPDATE trip_plans
-            SET itinerary_id = ?, generation_status = 'completed',
-                generation_error = NULL
-          WHERE id = ? AND user_id = ?`
-      ).run(itineraryId, planId, userId);
+            SET generation_status = 'failed', generation_error = ?,
+                generation_token = NULL, generation_lease_until = NULL
+          WHERE id = ? AND user_id = ? AND (? IS NULL OR generation_token = ?)`
+      ).run(error, planId, userId, token ?? null, token ?? null);
+    },
+
+    completeGeneration({ userId, planId, token, scenario, tripDays, generated }) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const owned = db
+          .prepare(
+            `SELECT 1 FROM trip_plans
+              WHERE id = ? AND user_id = ? AND generation_status = 'processing'
+                AND generation_token = ?`
+          )
+          .get(planId, userId, token);
+        if (!owned) {
+          db.exec("ROLLBACK");
+          return false;
+        }
+        const itineraryId = insertGeneratedItinerary(db, userId, planId, scenario, generated);
+        insertGeneratedPacking(db, userId, planId, tripDays, generated.packing);
+        db.prepare(
+          `UPDATE trip_plans
+              SET itinerary_id = ?, generation_status = 'completed',
+                  generation_error = NULL, generation_token = NULL,
+                  generation_lease_until = NULL, weather_snapshot = ?
+            WHERE id = ?`
+        ).run(
+          itineraryId,
+          generated.weatherSnapshot ? JSON.stringify(generated.weatherSnapshot) : null,
+          planId
+        );
+        db.exec("COMMIT");
+        return true;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
+
+    weatherSnapshot(userId, planId) {
+      const row = db
+        .prepare(`SELECT weather_snapshot FROM trip_plans WHERE id = ? AND user_id = ?`)
+        .get(planId, userId) as { weather_snapshot: string | null } | undefined;
+      return row?.weather_snapshot ? (JSON.parse(row.weather_snapshot) as TripForecast) : null;
     },
 
     remove(userId, planId) {
@@ -240,6 +356,9 @@ export function createTripPlanStore(db: DatabaseSync): SyncTripPlanStore {
         db.prepare(
           `DELETE FROM generated_packing_plans
             WHERE trip_plan_id = ? AND user_id = ?`
+        ).run(planId, userId);
+        db.prepare(
+          `DELETE FROM packing_checks WHERE trip_plan_id = ? AND user_id = ?`
         ).run(planId, userId);
         const result = db
           .prepare(`DELETE FROM trip_plans WHERE id = ? AND user_id = ?`)

@@ -120,10 +120,17 @@ struct ScenariosResponse: Codable {
 // MARK: - Wardrobe
 
 /// A stored wardrobe piece. The detail fields feed outfit recommendation.
+/// Mirrors `WardrobeKind` in `shared/wardrobe-types.ts`.
+enum WardrobeKind: String, Codable, Hashable {
+    case top, pants, skirt, shoes, accessory
+}
+
 struct WardrobeItem: Codable, Identifiable, Hashable {
     let id: String
     /// Headline, e.g. 黄色宽松工装裤.
     let title: String
+    /// English headline from recognition; empty for items saved before it.
+    var titleEn: String?
     let category: String
     /// Specific cut, e.g. 工装裤.
     let subtype: String
@@ -136,8 +143,16 @@ struct WardrobeItem: Codable, Identifiable, Hashable {
     let details: String
     let hasPhoto: Bool
     let createdAt: String
+    /// Canonical garment kind decided by the server; nil when unclassified.
+    let kind: WardrobeKind?
     /// Description-derived display contract shared with the web wardrobe.
     let visual: OutfitPiece
+
+    /// The headline in the UI language, falling back to the stored Chinese.
+    func displayTitle(_ lang: Lang) -> String {
+        if lang == .en, let titleEn, !titleEn.isEmpty { return titleEn }
+        return title
+    }
 
     /// Card subtitle: cut · fit · fabric, skipping whatever is blank.
     var metaLine: String {
@@ -185,11 +200,14 @@ enum AssistantAction: Decodable {
     case navigate(page: AssistantPage, scenario: String?)
     case profileUpdated(User)
     case tripCreated
-    case packingChanged(balance: Double?, checked: [String], unchecked: [String])
+    /// The server has already stored the ticks; this names the checklist to open.
+    case packingChanged(tripPlanId: String?, balance: Double?)
+    /// The assistant proposes deleting an item; the user confirms first.
+    case confirmDeleteWardrobeItem(id: String, title: String)
     case unsupported
 
     private enum CodingKeys: String, CodingKey {
-        case type, page, scenario, user, balance, checked, unchecked
+        case type, page, scenario, user, balance, tripPlanId, id, title
     }
 
     init(from decoder: Decoder) throws {
@@ -204,9 +222,13 @@ enum AssistantAction: Decodable {
             self = .tripCreated
         case "packingChanged":
             self = .packingChanged(
-                balance: try container.decodeIfPresent(Double.self, forKey: .balance),
-                checked: try container.decodeIfPresent([String].self, forKey: .checked) ?? [],
-                unchecked: try container.decodeIfPresent([String].self, forKey: .unchecked) ?? []
+                tripPlanId: try container.decodeIfPresent(String.self, forKey: .tripPlanId),
+                balance: try container.decodeIfPresent(Double.self, forKey: .balance)
+            )
+        case "confirmDeleteWardrobeItem":
+            self = .confirmDeleteWardrobeItem(
+                id: try container.decode(String.self, forKey: .id),
+                title: try container.decode(String.self, forKey: .title)
             )
         default:
             self = .unsupported

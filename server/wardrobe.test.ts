@@ -98,6 +98,22 @@ test("update only touches whitelisted fields", () => {
   assert.deepEqual(updated?.colors, ["黄色"]);
 });
 
+test("colours can be corrected and a renamed title drops its stale English", () => {
+  const { store } = freshStore();
+  const item = store.add("u1", { ...BASE, titleEn: "Yellow relaxed jacket", colors: ["黄色"] });
+  assert.equal(item.titleEn, "Yellow relaxed jacket");
+
+  const recoloured = store.update("u1", item.id, { colors: ["蓝色"], seasons: ["秋"] });
+  assert.deepEqual(recoloured?.colors, ["蓝色"]);
+  assert.deepEqual(recoloured?.seasons, ["秋"]);
+  assert.equal(recoloured?.titleEn, "Yellow relaxed jacket", "untouched title keeps its English");
+
+  const renamed = store.update("u1", item.id, { title: "蓝色宽松外套" });
+  assert.equal(renamed?.titleEn, "", "no stale English name for a renamed item");
+  const both = store.update("u1", item.id, { title: "蓝色外套", titleEn: "Blue jacket" });
+  assert.equal(both?.titleEn, "Blue jacket");
+});
+
 test("update and remove reject other users' items", () => {
   const { store } = freshStore();
   const item = store.add("u1", BASE);

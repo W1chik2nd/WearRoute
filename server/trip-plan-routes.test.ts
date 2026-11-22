@@ -167,8 +167,10 @@ test("行程天气按保存日期返回含首尾天数和逐日预报", async (t
   assert.equal(result.trip.dayCount, 3);
   assert.equal(result.forecast.available, true);
   assert.equal(result.forecast.days.length, 3);
+  assert.deepEqual(result.changes, [], "no snapshot for a trip that was never generated");
   assert.deepEqual(result.forecast.days[1], {
     date: "2026-08-27",
+    basis: "forecast",
     condition: "Rain",
     minTempC: 24,
     maxTempC: 29,

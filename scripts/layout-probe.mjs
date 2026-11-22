@@ -14,8 +14,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+// CHROME_PATH overrides; otherwise the macOS app or `google-chrome` on PATH
+// (GitHub's Ubuntu runners ship it), so the probe also runs in CI.
 const CHROME =
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  process.env.CHROME_PATH ??
+  (process.platform === "darwin"
+    ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    : "google-chrome");
 
 // 真实样式:把 theme/day-plan 两份 CSS 直接读进来,量的就是线上那套。
 const css = [

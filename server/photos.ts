@@ -13,6 +13,9 @@
 
 export type PhotoProvider = "unsplash" | "pexels" | "openverse";
 
+/** Per lookup; a slow library falls through to the next keyword or the placeholder. */
+const PHOTO_TIMEOUT_MS = 8_000;
+
 export type Photo = {
   /** 卡片用的图,横图优先。 */
   imageUrl: string;
@@ -44,6 +47,7 @@ async function searchUnsplash(query: string): Promise<Photo | null> {
     `https://api.unsplash.com/search/photos` +
     `?query=${encodeURIComponent(query)}&per_page=1&orientation=landscape`;
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
     headers: { Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}` },
   });
   if (!res.ok) throw new Error(`unsplash ${res.status}`);
@@ -68,6 +72,7 @@ async function searchPexels(query: string): Promise<Photo | null> {
     `https://api.pexels.com/v1/search` +
     `?query=${encodeURIComponent(query)}&per_page=1&orientation=landscape`;
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
     headers: { Authorization: process.env.PEXELS_API_KEY! },
   });
   if (!res.ok) throw new Error(`pexels ${res.status}`);
@@ -92,6 +97,7 @@ async function searchOpenverse(query: string): Promise<Photo | null> {
     `https://api.openverse.org/v1/images/` +
     `?q=${encodeURIComponent(query)}&page_size=1&mature=false`;
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
     headers: { "User-Agent": "WearRoute/0.1 (dev)" },
   });
   if (!res.ok) throw new Error(`openverse ${res.status}`);
@@ -175,7 +181,7 @@ export function photoQueries(subject: PhotoSubject): string[] {
   const fallback = cityEn ? `${cityEn} ${generic}` : city ? `${city} ${generic}` : generic;
 
   const seen = new Set<string>();
-  const dedupe = (list: string[]) =>
+  const dedupe = (list: (string | undefined)[]) =>
     list
       .map((c) => (c ?? "").trim())
       .filter((c) => c.length > 0 && !seen.has(c) && seen.add(c));
@@ -191,13 +197,20 @@ export function photoQueries(subject: PhotoSubject): string[] {
 export async function findPhotoForSubject(
   subject: PhotoSubject
 ): Promise<{ photo: Photo; query: string } | null> {
+  let lastError: unknown = null;
+  let answered = false;
   for (const query of photoQueries(subject)) {
     try {
       const photo = await findPhoto(query);
       if (photo) return { photo, query };
-    } catch {
+      answered = true;
+    } catch (error) {
       // 限流/网络故障:换下一个候选词继续试。
+      lastError = error;
     }
   }
+  // Every candidate failed (rate limit, outage): that is not "no photo exists",
+  // so report it and let the caller avoid caching a miss.
+  if (!answered && lastError) throw lastError;
   return null;
 }

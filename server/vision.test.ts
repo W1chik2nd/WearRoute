@@ -2,7 +2,7 @@
 // 这里用假的 fetch 返回模型响应,不打真实 API。
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { recognizeClothing, NotClothingError } from "./vision.ts";
+import { extractJsonObject, parseSeason, recognizeClothing, NotClothingError } from "./vision.ts";
 
 const IMG = "data:image/jpeg;base64,AAAA";
 
@@ -62,6 +62,7 @@ test("accepts a normal clothing result", async () => {
   mockModelReply(
     JSON.stringify({
       title: "黑色宽松工装裤",
+      titleEn: "Black relaxed cargo trousers",
       category: "裤装",
       subtype: "工装裤",
       colors: ["黑色"],
@@ -74,6 +75,7 @@ test("accepts a normal clothing result", async () => {
   );
   const item = await recognizeClothing(IMG);
   assert.equal(item.title, "黑色宽松工装裤");
+  assert.equal(item.titleEn, "Black relaxed cargo trousers");
   assert.equal(item.subtype, "工装裤", "款式由模型自由判断");
   assert.equal(item.fit, "宽松");
   mock.restoreAll();
@@ -137,4 +139,21 @@ test("a single unknown field does not reject an otherwise good result", async ()
   const item = await recognizeClothing(IMG);
   assert.equal(item.title, "白色圆领T恤");
   mock.restoreAll();
+});
+
+test("model replies wrapped in prose still parse as JSON", () => {
+  assert.equal(
+    extractJsonObject('好的，结果如下：\n```json\n{"title":"白T"}\n```\n希望有帮助'),
+    '{"title":"白T"}'
+  );
+});
+
+test("personal colour season comes from the tagged line, not the option list", () => {
+  const report = "2. 最匹配的四季配色方向：春 / 夏 / 秋 / 冬 → 结论偏秋季型\n...\nSEASON: autumn";
+  assert.deepEqual(parseSeason(report), {
+    analysis: "2. 最匹配的四季配色方向：春 / 夏 / 秋 / 冬 → 结论偏秋季型\n...",
+    season: "autumn",
+  });
+  assert.equal(parseSeason("整体判断为冬季型，适合高对比色。").season, "winter");
+  assert.equal(parseSeason("照片光线太暗，无法判断。").season, null);
 });

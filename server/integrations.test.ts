@@ -30,6 +30,7 @@ test("searchKeyword joins color and title without duplication", () => {
     seasons: [],
     styleTags: [],
     details: "",
+    titleEn: "",
   };
   assert.equal(
     searchKeyword({ ...base, title: "牛仔外套", colors: ["蓝色"] }),

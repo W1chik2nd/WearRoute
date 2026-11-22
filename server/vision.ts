@@ -7,6 +7,8 @@
 export type RecognizedItem = {
   /** 卡片大标题:颜色+版型+具体款式,如“黄色宽松工装外套”。 */
   title: string;
+  /** 同一标题的英文版,如 "Yellow relaxed utility jacket"。 */
+  titleEn: string;
   category: string; // 例:"外套"
   /** 具体款式,如 工装裤/阔腿裤/紧身牛仔裤/飞行夹克/卫衣。 */
   subtype: string;
@@ -33,7 +35,7 @@ const PROMPT = `你是资深服装买手,擅长精准描述服装、鞋履和服
 衣物、鞋履和服饰配件都属于有效的衣柜单品。服饰配件包括帽子、围巾、腰带、包袋、眼镜、手表、领带、手套和珠宝首饰;看到这些物品时必须按 category="配饰" 输出,绝不能标记为 notClothing。
 
 是有效衣柜单品时输出:
-{"title":"颜色+版型+具体款式,如 黑色宽松工装裤 / 蓝色紧身牛仔裤","category":"大类(T恤/衬衫/针织衫/卫衣/外套/裤装/裙装/鞋履/配饰 之一)","subtype":"你判断出的具体款式名","colors":["主色在前,最多3个"],"fit":"版型","material":"材质,按厚薄和垂坠感判断","seasons":["春/夏/秋/冬"],"styleTags":["风格,如 正式/通勤/休闲/运动/街头/复古"],"details":"2-3句详细描述"}
+{"title":"颜色+版型+具体款式,如 黑色宽松工装裤 / 蓝色紧身牛仔裤","titleEn":"同一标题的自然英文,如 Black relaxed cargo trousers","category":"大类(T恤/衬衫/针织衫/卫衣/外套/裤装/裙装/鞋履/配饰 之一)","subtype":"你判断出的具体款式名","colors":["主色在前,最多3个"],"fit":"版型","material":"材质,按厚薄和垂坠感判断","seasons":["春/夏/秋/冬"],"styleTags":["风格,如 正式/通勤/休闲/运动/街头/复古"],"details":"2-3句详细描述"}
 
 要求:
 1. subtype 用你自己判断的准确款式名,越具体越好(如 工装裤、阔腿牛仔裤、飞行夹克、连帽卫衣、切尔西靴)。不要只写大类,也不要拘泥于固定选项,按你看到的款式如实命名。
@@ -42,6 +44,19 @@ const PROMPT = `你是资深服装买手,擅长精准描述服装、鞋履和服
 4. 不要输出"适合日常穿着""百搭"这类没有信息量的话。
 5. 配饰没有传统服装版型时,fit 填"不适用";仍需判断材质、适用季节和可观察结构。
 6. 每个字段都要给出判断,不要填"未知"。实在看不清的字段按最可能的情况推测。`;
+
+/** Vision calls had no timeout, so a stalled provider hung the upload forever. */
+const VISION_TIMEOUT_MS = 60_000;
+
+/**
+ * The first JSON object in a model reply. Models sometimes wrap it in a code
+ * fence or a sentence despite the prompt; only stripping fences failed then.
+ */
+export function extractJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? text.slice(start, end + 1) : text.trim();
+}
 
 export function visionConfigured(): boolean {
   return Boolean(process.env.VISION_API_KEY);
@@ -59,7 +74,25 @@ const PERSONAL_COLOR_PROMPT = `你是专业形象顾问和高级时尚造型师�
 7. 配饰金属建议：银色 / 金色，并说明配色原因
 8. 最显亮肤色的颜色、最容易让整体显灰暗的颜色
 9. 最后用“我的整体气质关键词：……”总结
-如果照片不适合准确判断，请说明限制，但仍然基于照片中可见的颜色关系给出一套具体的造型配色建议。`;
+如果照片不适合准确判断，请说明限制，但仍然基于照片中可见的颜色关系给出一套具体的造型配色建议。
+最后单独一行只输出机器可读结果（四选一，选最可能的）：SEASON: spring|summer|autumn|winter`;
+
+const SEASON_LINE = /^\s*SEASON:\s*(spring|summer|autumn|winter)\s*$/im;
+const SEASON_BY_CHINESE: Record<string, string> = { 春: "spring", 夏: "summer", 秋: "autumn", 冬: "winter" };
+
+/**
+ * The season comes from a fixed last line the prompt asks for. Scraping it
+ * out of the free-form report used to miss most phrasings ("秋季型") and
+ * could pick up the "春 / 夏 / 秋 / 冬" option list instead of the answer.
+ */
+export function parseSeason(text: string): { analysis: string; season: string | null } {
+  const tagged = text.match(SEASON_LINE);
+  if (tagged) {
+    return { analysis: text.replace(SEASON_LINE, "").trim(), season: tagged[1].toLowerCase() };
+  }
+  const named = text.match(/(春|夏|秋|冬)季型/);
+  return { analysis: text.trim(), season: named ? SEASON_BY_CHINESE[named[1]] : null };
+}
 
 export async function analyzePersonalColor(imageDataUrl: string): Promise<{ analysis: string; season: string | null }> {
   const baseUrl = process.env.VISION_BASE_URL ?? "https://dashscope.aliyuncs.com/compatible-mode/v1";
@@ -79,14 +112,13 @@ export async function analyzePersonalColor(imageDataUrl: string): Promise<{ anal
       ] }],
       temperature: 0.4,
     }),
+    signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`vision api ${res.status}`);
   const body = (await res.json()) as any;
   const text = body?.choices?.[0]?.message?.content;
   if (typeof text !== "string" || text.trim().length === 0) throw new Error("vision api: empty response");
-  const seasonMatch = text.match(/(?:四季型|季型|season)[^\n：:]*[：:]?\s*(春|夏|秋|冬)/i);
-  const season = seasonMatch ? ({ 春: "spring", 夏: "summer", 秋: "autumn", 冬: "winter" } as Record<string, string>)[seasonMatch[1]] ?? null : null;
-  return { analysis: text.trim(), season };
+  return parseSeason(text);
 }
 
 export async function recognizeClothing(
@@ -115,6 +147,7 @@ export async function recognizeClothing(
         },
       ],
     }),
+    signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -127,7 +160,7 @@ export async function recognizeClothing(
   const text: unknown = body?.choices?.[0]?.message?.content;
   if (typeof text !== "string") throw new Error("vision api: empty response");
 
-  const cleaned = text.replace(/```json|```/g, "").trim();
+  const cleaned = extractJsonObject(text);
   let parsed: any;
   try {
     parsed = JSON.parse(cleaned);
@@ -148,6 +181,8 @@ export async function recognizeClothing(
   const str = (v: unknown): string => (typeof v === "string" ? v : "");
   const item: RecognizedItem = {
     title: parsed.title,
+    // Stored with the item so the English UI never re-translates it per view.
+    titleEn: str(parsed.titleEn).trim(),
     category: normalizeCategory(parsed.category),
     subtype: str(parsed.subtype),
     colors: strings(parsed.colors),

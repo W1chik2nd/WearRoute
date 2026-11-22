@@ -5,7 +5,8 @@ import {
   type TripWeather as TripWeatherData,
 } from "../api";
 import { useLang } from "../i18n/useLang";
-import { WEATHER_CONDITION_LABELS } from "../i18n/dynamic-strings";
+import { WEATHER_CONDITION_LABELS, weatherChangeMessage } from "../i18n/dynamic-strings";
+import { tripDaysInclusive } from "../../../shared/trip-constraints";
 import { weatherIconPath } from "../lib/trip-dashboard";
 
 type Props = {
@@ -77,7 +78,8 @@ export default function TripWeather({ tripPlanId, onBack }: Props) {
     );
   }
 
-  const { trip, forecast } = data;
+  const { trip, forecast, changes } = data;
+  const hasTypical = forecast.days.some((day) => day.basis === "typical");
   const slideForecast = (direction: -1 | 1) => {
     const track = forecastTrack.current;
     if (!track) return;
@@ -120,6 +122,19 @@ export default function TripWeather({ tripPlanId, onBack }: Props) {
         </div>
       </section>
 
+      {changes.length > 0 && (
+        <section className="trip-weather-changes" role="status">
+          <h2>{t("tripWeatherChangesTitle")}</h2>
+          <ul>
+            {changes.map((change) => (
+              <li key={`${change.date}-${change.kind}`}>
+                {weatherChangeMessage(lang, formatDate(change.date), change)}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <section className="trip-weather-forecast">
         <header>
           <h2>{t("tripWeatherDaily")}</h2>
@@ -146,24 +161,28 @@ export default function TripWeather({ tripPlanId, onBack }: Props) {
           </div>
         </header>
 
-        {forecast.available ? (
+        {forecast.available && (
           <div
             className="trip-weather-grid"
             ref={forecastTrack}
             tabIndex={forecast.days.length > 3 ? 0 : undefined}
             aria-label={t("tripWeatherDaily")}
           >
-            {forecast.days.map((day, index) => (
+            {forecast.days.map((day) => (
               <ForecastCard
                 key={day.date}
                 day={day}
-                index={index}
+                dayNumber={tripDaysInclusive(trip.startDate, day.date)}
                 locale={locale}
                 lang={lang}
               />
             ))}
           </div>
-        ) : (
+        )}
+        {forecast.available && hasTypical && (
+          <p className="trip-weather-typical-hint">{t("tripWeatherTypicalHint")}</p>
+        )}
+        {!forecast.available && (
           <div className="trip-weather-unavailable">
             <span aria-hidden="true">!</span>
             <p>{t("tripWeatherOutsideWindow")}</p>
@@ -176,12 +195,13 @@ export default function TripWeather({ tripPlanId, onBack }: Props) {
 
 function ForecastCard({
   day,
-  index,
+  dayNumber,
   locale,
   lang,
 }: {
   day: ForecastDay;
-  index: number;
+  /** From the date, so a gap in provider data cannot shift the numbering. */
+  dayNumber: number;
   locale: string;
   lang: "en" | "zh";
 }) {
@@ -199,8 +219,11 @@ function ForecastCard({
       <header>
         <span>
           {lang === "zh"
-            ? `${t("tripWeatherDay")}${index + 1}${t("tripWeatherDayUnit")}`
-            : `${t("tripWeatherDay")} ${index + 1}`}
+            ? `${t("tripWeatherDay")}${dayNumber}${t("tripWeatherDayUnit")}`
+            : `${t("tripWeatherDay")} ${dayNumber}`}
+          {day.basis === "typical" && (
+            <em className="trip-weather-typical">{t("tripWeatherTypical")}</em>
+          )}
         </span>
         <time dateTime={day.date}>{dateLabel}</time>
       </header>
@@ -215,7 +238,7 @@ function ForecastCard({
         <div><dt>{t("tripWeatherHigh")}</dt><dd>{Math.round(day.maxTempC)}°C</dd></div>
         <div><dt>{t("tripWeatherLow")}</dt><dd>{Math.round(day.minTempC)}°C</dd></div>
         <div><dt>{t("tripWeatherRain")}</dt><dd>{Math.round(day.precipitationProbability)}%</dd></div>
-        <div><dt>{t("tripWeatherUv")}</dt><dd>{day.uvIndex.toFixed(1)}</dd></div>
+        <div><dt>{t("tripWeatherUv")}</dt><dd>{day.uvIndex === null ? "—" : day.uvIndex.toFixed(1)}</dd></div>
         <div className="trip-weather-wind"><dt>{t("tripWeatherWind")}</dt><dd>{Math.round(day.maxWindKph)} km/h</dd></div>
       </dl>
     </article>

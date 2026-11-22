@@ -50,7 +50,7 @@ export async function handleTripPlanRoutes(ctx: Ctx): Promise<boolean> {
       json(res, 404, { error: "Trip not found." });
       return true;
     }
-    json(res, 200, await weatherForTrip(plan));
+    json(res, 200, await weatherForTrip(plan, await tripPlans.weatherSnapshot(user.id, plan.id)));
     return true;
   }
 

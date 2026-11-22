@@ -1,8 +1,11 @@
-import type { WardrobeItem } from "../../shared/wardrobe-types";
+import type { WardrobeItem, WardrobeKind } from "../../shared/wardrobe-types";
 import type { OutfitPiece } from "../../shared/outfit-types";
 
-export type { WardrobeItem } from "../../shared/wardrobe-types";
-export type WardrobeDisplayItem = WardrobeItem & { visual: OutfitPiece };
+export type { WardrobeItem, WardrobeKind } from "../../shared/wardrobe-types";
+export type WardrobeDisplayItem = WardrobeItem & {
+  kind: WardrobeKind | null;
+  visual: OutfitPiece;
+};
 export type {
   ForecastDay,
   TripWeather,
@@ -102,10 +105,11 @@ export type AssistantClientAction =
   | { type: "tripCreated" }
   | {
       type: "packingChanged";
+      tripPlanId: string;
       balance?: number;
-      checked?: string[];
-      unchecked?: string[];
-    };
+    }
+  /** The assistant proposes a deletion; the user confirms before it happens. */
+  | { type: "confirmDeleteWardrobeItem"; id: string; title: string };
 
 export type TripGenerationEstimate = {
   minSeconds: number;

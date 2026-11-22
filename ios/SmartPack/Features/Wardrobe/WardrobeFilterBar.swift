@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Category filter for the wardrobe grid, ported from
-/// `client/src/lib/wardrobe-filter.ts`. The categories the server stores are
-/// Chinese labels; the mapping lives here because it is presentation, not a
-/// wardrobe rule.
+/// Category filter for the wardrobe grid. The server classifies every item
+/// (`server/wardrobe-kind.ts`); this only maps a chip to that kind, the same
+/// way `client/src/lib/wardrobe-filter.ts` does.
 enum WardrobeFilter: String, CaseIterable, Identifiable {
     case all, tops, pants, skirts, shoes, accessories
 
@@ -20,39 +19,21 @@ enum WardrobeFilter: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The server-side kind each chip selects; nil for "all".
+    private var kind: WardrobeKind? {
+        switch self {
+        case .all: return nil
+        case .tops: return .top
+        case .pants: return .pants
+        case .skirts: return .skirt
+        case .shoes: return .shoes
+        case .accessories: return .accessory
+        }
+    }
+
     func apply(to items: [WardrobeItem]) -> [WardrobeItem] {
-        guard self != .all else { return items }
-        return items.filter { Self.category(of: $0) == self }
-    }
-
-    private static func category(of item: WardrobeItem) -> WardrobeFilter? {
-        let category = item.category.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let detail = "\(item.subtype) \(item.title)".lowercased()
-        let text = "\(item.category) \(item.subtype) \(item.title)".lowercased()
-
-        if ["top", "上衣", "上装", "衣服"].contains(category) { return .tops }
-        if ["accessory", "accessories", "配饰"].contains(category) { return .accessories }
-        if ["shoe", "shoes", "footwear", "鞋履", "鞋子"].contains(category) { return .shoes }
-        if ["bottom", "下装"].contains(category) {
-            return matches(detail, #"skirt|dress|裙装|裙子|半裙|连衣裙|a字裙"#) ? .skirts : .pants
-        }
-
-        if matches(text, #"skirt|dress|裙装|裙子|半裙|连衣裙|a字裙"#) { return .skirts }
-        if matches(text, #"accessor|配饰|包|帽|围巾|眼镜|腕表|手表|项链|腰带|皮带"#) {
-            return .accessories
-        }
-        if matches(text, #"shoe|sneaker|loafer|boot|sandal|鞋履|鞋子|鞋|靴"#) { return .shoes }
-        if matches(text, #"pants|trouser|jeans|shorts|bottom|裤装|裤子|长裤|短裤|牛仔裤|工装裤|下装"#) {
-            return .pants
-        }
-        if matches(text, #"top|shirt|tee|blouse|sweater|jacket|coat|hoodie|上衣|上装|t恤|衬衫|针织|卫衣|夹克|外套"#) {
-            return .tops
-        }
-        return nil
-    }
-
-    private static func matches(_ text: String, _ pattern: String) -> Bool {
-        text.range(of: pattern, options: .regularExpression) != nil
+        guard let kind else { return items }
+        return items.filter { $0.kind == kind }
     }
 }
 

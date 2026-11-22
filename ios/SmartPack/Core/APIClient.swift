@@ -35,8 +35,18 @@ actor APIClient {
 
     struct APIError: LocalizedError {
         let message: String
+        /// HTTP status, or nil when the server could not be reached at all.
+        var status: Int? = nil
         var errorDescription: String? { message }
+        /// The stored session is no longer valid; signing in again is the fix.
+        var isUnauthorized: Bool { status == 401 }
+        /// Offline, timed out, or the backend is still waking up.
+        var isUnreachable: Bool { status == nil }
     }
+
+    /// Posted when a request made with a session token comes back 401, so the
+    /// app returns to sign-in instead of every screen failing on its own.
+    nonisolated static let sessionExpired = Notification.Name("WearRouteSessionExpired")
 
     private func request<T: Decodable>(
         _ path: String,
@@ -46,7 +56,8 @@ actor APIClient {
         var req = URLRequest(url: Self.url(path))
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token = TokenStore.token {
+        let token = TokenStore.token
+        if let token {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         req.httpBody = body
@@ -63,10 +74,25 @@ actor APIClient {
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
+            if status == 401, token != nil {
+                NotificationCenter.default.post(name: Self.sessionExpired, object: nil)
+            }
             let detail = (try? decoder.decode(ErrorBody.self, from: data))?.error
-            throw APIError(message: detail ?? "Request failed (\(status))")
+            throw APIError(message: detail ?? "Request failed (\(status))", status: status)
         }
         return try decoder.decode(T.self, from: data)
+    }
+
+    /// Photo bytes, fetched with the Authorization header like every other call.
+    func wardrobePhoto(id: String) async throws -> Data {
+        var req = URLRequest(url: Self.url("/api/wardrobe/photo/\(query(id))"))
+        if let token = TokenStore.token {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw APIError(message: "Photo unavailable", status: status) }
+        return data
     }
 
     private func send<T: Decodable, Body: Encodable>(
@@ -146,14 +172,6 @@ actor APIClient {
         try await request("/api/wardrobe/items/\(query(id))", method: "DELETE")
     }
 
-    /// Photo URL for `AsyncImage`. The token rides in the query string because
-    /// image loaders send no Authorization header — same contract as the web.
-    nonisolated static func wardrobePhotoURL(id: String) -> URL? {
-        let encodedId = id.addingPercentEncoding(withAllowedCharacters: .urlQueryValueAllowed) ?? id
-        let token = (TokenStore.token ?? "").addingPercentEncoding(withAllowedCharacters: .urlQueryValueAllowed) ?? ""
-        return URL(string: "/api/wardrobe/photo/\(encodedId)?token=\(token)", relativeTo: baseURL)
-    }
-
     // MARK: - Assistant
 
     func chat(messages: [ChatMessage]) async throws -> ChatResponse {
@@ -208,9 +226,26 @@ actor APIClient {
         try await request("/api/packing?balance=\(Int(balance))&tripPlanId=\(query(tripPlanId))")
     }
 
+    private struct PackingCheckBody: Encodable {
+        let tripPlanId: String
+        let itemId: String
+        let checked: Bool
+        let balance: Double
+    }
+
+    /// Ticks are stored per trip on the server; the reply is the refreshed plan.
+    func setPackingCheck(tripPlanId: String, itemId: String, checked: Bool, balance: Double) async throws -> PackingPlanResponse {
+        try await send(
+            "/api/packing/checks",
+            method: "PUT",
+            PackingCheckBody(tripPlanId: tripPlanId, itemId: itemId, checked: checked, balance: balance)
+        )
+    }
+
+    /// Sends the device's calendar day so "today" never falls back to UTC.
     func outfitPlan(tripPlanId: String?) async throws -> OutfitPlanResponse {
-        let suffix = tripPlanId.map { "?tripPlanId=\(query($0))" } ?? ""
-        return try await request("/api/outfit-plan\(suffix)")
+        let trip = tripPlanId.map { "&tripPlanId=\(query($0))" } ?? ""
+        return try await request("/api/outfit-plan?today=\(TripDate.todayISO)\(trip)")
     }
 }
 

@@ -36,10 +36,10 @@ struct WardrobeCard: View {
                         .overlay(Rectangle().strokeBorder(Theme.black, lineWidth: 1.5))
                 }
                 .padding(6)
-                .accessibilityLabel("\(Strings.wardrobeDelete(lang)) \(item.title)")
+                .accessibilityLabel("\(Strings.wardrobeDelete(lang)) \(item.displayTitle(lang))")
             }
 
-            Text(item.title)
+            Text(item.displayTitle(lang))
                 .font(Theme.heavy(14))
                 .foregroundStyle(Theme.text)
                 .lineLimit(2)

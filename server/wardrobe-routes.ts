@@ -12,9 +12,10 @@ import {
 import { searchProducts, ecommerceProvider } from "./ecommerce.ts";
 import type { AsyncValue } from "./async-value.ts";
 import { wardrobeItemVisual } from "./outfit-plan.ts";
+import { wardrobeKind } from "./wardrobe-kind.ts";
 
 function displayItem(item: Awaited<ReturnType<WardrobeStore["add"]>>) {
-  return { ...item, visual: wardrobeItemVisual(item) };
+  return { ...item, kind: wardrobeKind(item), visual: wardrobeItemVisual(item) };
 }
 
 type Ctx = {
@@ -26,8 +27,6 @@ type Ctx = {
   readBody: (req: IncomingMessage, maxBytes?: number) => Promise<any>;
   /** 从 Authorization 头解析用户;未登录返回 null。 */
   userFromHeader: () => AsyncValue<{ id: string } | null>;
-  /** 从 ?token= 解析用户,供 <img> 这类发不出请求头的场景使用。 */
-  userFromQuery: () => AsyncValue<{ id: string } | null>;
 };
 
 /** 处理了就返回 true,让 app.ts 知道不用继续匹配后面的路由。 */
@@ -82,6 +81,7 @@ export async function handleWardrobeRoutes(ctx: Ctx): Promise<boolean> {
     // 识别结果连同细节字段一起落库,这些细节是后续穿搭推荐要分析的原料。
     const saved = await wardrobe.add(user.id, {
       title: item.title,
+      titleEn: item.titleEn,
       category: item.category,
       subtype: item.subtype,
       colors: item.colors,
@@ -140,10 +140,20 @@ export async function handleWardrobeRoutes(ctx: Ctx): Promise<boolean> {
     const body = await readBody(req);
     // 信任边界:只接受白名单字段,并做基本类型校验。
     const patch: ItemPatch = {};
-    if (typeof body.title === "string") patch.title = body.title.trim();
-    if (typeof body.category === "string") patch.category = body.category.trim();
+    const list = (value: unknown) =>
+      Array.isArray(value) && value.every((v) => typeof v === "string")
+        ? value.map((v: string) => v.trim()).filter(Boolean).slice(0, 12)
+        : undefined;
+    if (typeof body.title === "string" && body.title.trim()) patch.title = body.title.trim();
+    if (typeof body.titleEn === "string") patch.titleEn = body.titleEn.trim();
+    if (typeof body.category === "string" && body.category.trim()) {
+      patch.category = body.category.trim();
+    }
     if (typeof body.subtype === "string") patch.subtype = body.subtype.trim();
-    if (typeof body.count === "number" && body.count > 0) patch.count = body.count;
+    if (Number.isInteger(body.count) && body.count > 0 && body.count <= 99) patch.count = body.count;
+    patch.colors = list(body.colors);
+    patch.seasons = list(body.seasons);
+    patch.styleTags = list(body.styleTags);
     if (typeof body.fit === "string") patch.fit = body.fit.trim();
     if (typeof body.material === "string") patch.material = body.material.trim();
     if (typeof body.details === "string") patch.details = body.details.trim();
@@ -159,8 +169,10 @@ export async function handleWardrobeRoutes(ctx: Ctx): Promise<boolean> {
 
   // 照片:库里只存文件名,图片本体从磁盘按 id 取。
   if (method === "GET" && path.startsWith("/api/wardrobe/photo/")) {
-    // <img> 标签发不出 Authorization 头,所以这里也接受 ?token=。
-    const user = (await userFromHeader()) ?? (await ctx.userFromQuery());
+    // Header auth only. A session token in the query string ends up in access
+    // logs, browser history and Referer headers; clients fetch the bytes with
+    // the Authorization header instead (see AuthorizedPhoto on iOS).
+    const user = await userFromHeader();
     if (!user) {
       json(res, 401, { error: "Not signed in." });
       return true;

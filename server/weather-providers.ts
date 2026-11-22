@@ -14,7 +14,7 @@ const FORECAST_TTL_MS = 30 * 60 * 1_000;
 const STALE_TTL_MS = 6 * 60 * 60 * 1_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_RETRY_DELAY_MS = 1_000;
-const WEATHER_USER_AGENT =
+export const WEATHER_USER_AGENT =
   "WearRoute/1.0 https://github.com/W1chik2nd/WearRoute";
 
 type CacheEntry<T> = {
@@ -25,7 +25,7 @@ type CacheEntry<T> = {
 
 const cache = new Map<string, CacheEntry<unknown>>();
 
-function describeWmo(code: number): string {
+export function describeWmo(code: number): string {
   if (code === 0) return "Clear";
   if (code <= 2) return "Partly cloudy";
   if (code === 3) return "Overcast";
@@ -64,7 +64,7 @@ function retryDelay(response: Response): number | null {
   return Number.isNaN(timestamp) ? null : Math.max(0, timestamp - Date.now());
 }
 
-async function providerFetch(
+export async function providerFetch(
   url: string,
   headers: Record<string, string> = {}
 ): Promise<Response> {
@@ -84,7 +84,7 @@ async function providerFetch(
   return response;
 }
 
-async function cached<T>(
+export async function cached<T>(
   key: string,
   ttlMs: number,
   load: () => Promise<T>
@@ -270,6 +270,7 @@ async function openMeteoForecast(
     note: "Destination-local daily forecast supplied by Open-Meteo.",
     days: time.map((date, index) => ({
       date,
+      basis: "forecast" as const,
       condition: describeWmo(codes[index]),
       minTempC: min[index],
       maxTempC: max[index],
@@ -298,9 +299,15 @@ async function metNorwayForecast(
   endDate: string
 ): Promise<TripForecast> {
   const entries = await metNorwayTimeseries(lat, lon);
+  // MET timestamps are UTC. Grouping by the UTC date put a Tokyo or New York
+  // evening on the wrong day; shift by the solar offset of the longitude,
+  // the best estimate available without a timezone database.
+  const offsetMs = Math.round(lon / 15) * 3_600_000;
   const grouped = new Map<string, MetTimeseries[]>();
   for (const entry of entries) {
-    const date = entry.time?.slice(0, 10);
+    const date = entry.time
+      ? new Date(Date.parse(entry.time) + offsetMs).toISOString().slice(0, 10)
+      : undefined;
     if (!date || date < startDate || date > endDate) continue;
     grouped.set(date, [...(grouped.get(date) ?? []), entry]);
   }
@@ -325,6 +332,7 @@ async function metNorwayForecast(
       .filter((value): value is number => typeof value === "number");
     days.push({
       date,
+      basis: "forecast",
       condition: describeMet(weather.symbol),
       minTempC: Math.min(...temperatures),
       maxTempC: Math.max(...temperatures),

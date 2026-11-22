@@ -92,11 +92,7 @@ struct DayPlanView: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(spacing: Theme.space1) {
                     if let itemId = row.1, row.2 {
-                        AsyncImage(url: APIClient.wardrobePhotoURL(id: itemId)) { image in
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            Theme.bg
-                        }
+                        AuthorizedPhoto(itemId: itemId)
                         .frame(width: 34, height: 34)
                         .clipped()
                         .overlay(Rectangle().strokeBorder(Theme.black, lineWidth: 1.5))

@@ -132,6 +132,33 @@ enum Strings {
         zh: "无法加载此行程的天气。"
     )
     static let tripWeatherRetry = LocalizedText(en: "Try again", zh: "重新加载")
+    static let tripWeatherTypical = LocalizedText(en: "Typical", zh: "往年同期")
+    static let tripWeatherTypicalHint = LocalizedText(
+        en: "Typical days are averages for these dates over the last 3 years, not a forecast.",
+        zh: "“往年同期”是近 3 年同日期的平均天气，不是预报。"
+    )
+    static let tripWeatherChangesTitle = LocalizedText(
+        en: "The forecast has changed since your outfits were planned",
+        zh: "穿搭规划后天气预报有变化"
+    )
+
+    /// One forecast change since planning, matching the web wording.
+    static func weatherChange(_ change: WeatherChange, date: String, _ lang: Lang) -> String {
+        let before = Int(change.before.rounded())
+        let after = Int(change.after.rounded())
+        switch change.kind {
+        case "rain", "dry":
+            let tip = change.kind == "rain" ? (lang == .zh ? "，记得带伞" : " — pack an umbrella") : ""
+            return lang == .zh
+                ? "\(date)：降雨概率 \(before)% → \(after)%\(tip)"
+                : "\(date): rain chance \(before)% → \(after)%\(tip)"
+        default:
+            let warmer = change.kind == "warmer"
+            return lang == .zh
+                ? "\(date)：最高气温 \(before)°C → \(after)°C，\(warmer ? "可以穿得更轻薄" : "需要加一层")"
+                : "\(date): high \(before)°C → \(after)°C — \(warmer ? "dress lighter" : "add a layer")"
+        }
+    }
     static let checklist = LocalizedText(en: "Checklist", zh: "物品清单")
     static let todaysOutfit = LocalizedText(en: "Today's Outfit", zh: "今日穿搭")
     static let outfitUnavailable = LocalizedText(en: "Outfit unavailable", zh: "穿搭暂不可用")
@@ -201,4 +228,14 @@ enum Strings {
     static let profileFinish = LocalizedText(en: "Save profile", zh: "保存资料")
     static let backToHome = LocalizedText(en: "Back to Home", zh: "返回主页")
     static let close = LocalizedText(en: "Close", zh: "关闭")
+    static let unreachableTitle = LocalizedText(en: "Can't reach WearRoute", zh: "暂时连不上 WearRoute")
+    static let unreachableBody = LocalizedText(
+        en: "You're still signed in. Check your connection — the server may also be waking up, which can take up to a minute.",
+        zh: "你的登录状态仍然保留。请检查网络；服务器也可能正在启动，最多需要一分钟。"
+    )
+    static let unreachableRetry = LocalizedText(en: "Try again", zh: "重试")
+    static let tripsLoadRetrying = LocalizedText(
+        en: "Couldn't refresh your trips. Retrying…",
+        zh: "暂时无法刷新行程，正在重试…"
+    )
 }

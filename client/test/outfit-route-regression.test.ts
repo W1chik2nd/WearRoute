@@ -17,7 +17,7 @@ test("Today Outfit uses a stable shell callback and selected plan id", () => {
 test("switching outfit trip ids resets the previous overview state", () => {
   assert.match(overview, /setPlan\(null\);/);
   assert.match(overview, /setActiveIndex\(0\);/);
-  assert.match(overview, /getOutfitPlan\(tripPlanId\)/);
+  assert.match(overview, /getOutfitPlan\(tripPlanId, localIsoDate\(\)\)/);
   assert.match(overview, /\}, \[tripPlanId\]\);/);
 });
 

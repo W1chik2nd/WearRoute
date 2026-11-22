@@ -142,11 +142,11 @@ You can navigate WearRoute and perform database-backed actions. Return ONLY a JS
 Allowed actions:
 - {"type":"navigate","page":"home|trips|tripSetup|itinerary|wardrobe|profile|packing","scenario":"optional scenario id for tripSetup/itinerary"}
 - {"type":"updateProfile","profile":{...only fields the user asked to change...}}
-- {"type":"addWardrobeItem","item":{"title":"...","category":"...", optional fields}}
-- {"type":"updateWardrobeItem","id":"exact item id","patch":{"title|category|subtype|count|fit|material|details":"..."}}
-- {"type":"deleteWardrobeItem","id":"exact item id"}
+- {"type":"addWardrobeItem","item":{"title":"Chinese title","titleEn":"English title","category":"...", optional fields}}
+- {"type":"updateWardrobeItem","id":"exact item id","patch":{"title|titleEn|category|subtype|fit|material|details":"...","count":number,"colors|seasons|styleTags":["..."]}}
+- {"type":"deleteWardrobeItem","id":"exact item id"} (the user is asked to confirm before anything is deleted)
 - {"type":"packingChecklist","checked":["exact packing item ids"],"unchecked":["exact ids"],"balance":0-100}
-- {"type":"createTripPlan","plan":{"scenario":"commute|travel|business|date|sport|formal","placeName":"...","placeDetail":"...","lat":number,"lon":number,"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD"}}
+- {"type":"createTripPlan","plan":{"scenario":"commute|travel|business|date|sport|formal","placeName":"city or place name","startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","notes":"optional agenda"}} (the server finds the coordinates and starts generating the itinerary, outfits and packing list)
 Rules:
 - Navigate immediately when the user asks to open/go/show a page. tripSetup requires a scenario id; if none is known, navigate to trips first.
 - Mutating actions require an explicit request to add, change, save, delete, check, or set something. Recommendations alone never mutate data.

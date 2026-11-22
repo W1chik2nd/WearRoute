@@ -7,6 +7,7 @@ test("assistant context exposes real wardrobe and trip ids without photo data", 
     {
       id: "item-1",
       title: "Black blazer",
+      titleEn: "Black blazer",
       category: "outerwear",
       subtype: "blazer",
       count: 1,

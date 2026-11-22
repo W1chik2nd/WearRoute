@@ -5,8 +5,10 @@
 // whatever comes back — no packing rules, reuse math, or category logic live
 // in the front end, so the future SwiftUI client reuses this untouched.
 //
-// This serves the "Minimal Luggage Plan" and "Travel Essentials Checklist"
-// features (docs/personas-and-user-stories.md):
+// The agent supplies the list (trip-agent.ts); this module only applies the
+// slider. There is deliberately no generic fallback list: showing clothes the
+// user does not own as "their" packing list would be a fake success
+// (AGENTS.md §4). This serves (docs/personas-and-user-stories.md):
 //   US 6.1 — the fewest items that still cover the whole trip
 //   US 6.2 — show where each item is reused so the plan is trustworthy
 //   US 6.3 — a slider trading outfit variety against luggage minimization
@@ -49,153 +51,7 @@ export type StoredGeneratedPacking = {
   essentials: EssentialItem[];
 };
 
-// The candidate wardrobe, per category, ordered most-versatile first. Packing
-// "light" keeps the head of each list; adding variety extends toward the tail.
-// TODO: replace this static seed with the user's real wardrobe + itinerary once
-// those features land. Kept flat and readable on purpose (AGENTS.md §4).
-type Candidate = { id: string; label: string; labelEn: string };
-
-const WARDROBE: { id: string; title: string; titleEn: string; pool: Candidate[] }[] = [
-  {
-    id: "tops",
-    title: "上衣 Tops",
-    titleEn: "Tops",
-    pool: [
-      { id: "tee-white", label: "白色基础 T 恤", labelEn: "White basic tee" },
-      { id: "shirt-oxford", label: "牛津纺衬衫", labelEn: "Oxford shirt" },
-      { id: "knit-navy", label: "藏青针织衫", labelEn: "Navy knit sweater" },
-      { id: "tee-stripe", label: "条纹 T 恤", labelEn: "Striped tee" },
-      { id: "blouse-silk", label: "真丝衬衫", labelEn: "Silk blouse" },
-    ],
-  },
-  {
-    id: "bottoms",
-    title: "下装 Bottoms",
-    titleEn: "Bottoms",
-    pool: [
-      { id: "jeans-dark", label: "深色直筒牛仔裤", labelEn: "Dark straight jeans" },
-      { id: "chino-beige", label: "米色休闲裤", labelEn: "Beige chinos" },
-      { id: "skirt-black", label: "黑色半裙", labelEn: "Black skirt" },
-      { id: "shorts-linen", label: "亚麻短裤", labelEn: "Linen shorts" },
-    ],
-  },
-  {
-    id: "outer",
-    title: "外套 Outerwear",
-    titleEn: "Outerwear",
-    pool: [
-      { id: "blazer-navy", label: "藏青西装外套", labelEn: "Navy blazer" },
-      { id: "jacket-denim", label: "牛仔外套", labelEn: "Denim jacket" },
-      { id: "coat-trench", label: "风衣", labelEn: "Trench coat" },
-    ],
-  },
-  {
-    id: "shoes",
-    title: "鞋履 Shoes",
-    titleEn: "Shoes",
-    pool: [
-      { id: "sneaker-white", label: "白色小白鞋", labelEn: "White sneakers" },
-      { id: "loafer-black", label: "黑色乐福鞋", labelEn: "Black loafers" },
-      { id: "sandal-tan", label: "棕色凉鞋", labelEn: "Tan sandals" },
-    ],
-  },
-];
-
-// Non-clothing essentials always merged into every plan (US 7.1–7.3). The
-// sketch calls these out explicitly: 身份证 / 护照 first.
-const ESSENTIALS: EssentialItem[] = [
-  { id: "id-card", label: "身份证", labelEn: "ID card" },
-  { id: "passport", label: "护照", labelEn: "Passport" },
-  { id: "charger", label: "手机充电器 / 充电宝", labelEn: "Phone charger / power bank" },
-  { id: "adapter", label: "旅行转换插头", labelEn: "Travel adapter" },
-  { id: "umbrella", label: "折叠伞", labelEn: "Foldable umbrella" },
-  { id: "sunscreen", label: "防晒霜", labelEn: "Sunscreen" },
-  { id: "meds", label: "常备药品", labelEn: "Everyday medicine" },
-];
-
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-
-/**
- * How many pieces to pack from a category's pool for a given balance.
- * balance 0 → 1 piece (leanest), balance 100 → the whole pool (most variety).
- * The pool length caps it so we never invent items we don't have.
- */
-function countForBalance(poolSize: number, balance: number): number {
-  const ratio = clamp(balance, 0, 100) / 100;
-  const span = poolSize - 1;
-  return 1 + Math.round(span * ratio);
-}
-
-/**
- * Reuse count for a piece: with `days` of wear spread over `pieces` items in a
- * category, each piece is worn roughly days/pieces times. Fewer pieces (lean
- * packing) pushes reuse up — exactly the trade-off the slider expresses (US 6.2).
- */
-function reuseFor(days: number, pieces: number): number {
-  return Math.max(1, Math.round(days / pieces));
-}
-
-/**
- * Build a complete packing plan for the given slider value. Pure and
- * deterministic: same balance in, same plan out — trivial to test and to call
- * from the API handler.
- */
-export function buildPackingPlan(balance: number, tripDays = 4): PackingPlan {
-  const b = clamp(Math.round(balance), 0, 100);
-
-  const categories: PackingCategory[] = WARDROBE.map((cat) => {
-    const take = countForBalance(cat.pool.length, b);
-    const reuse = reuseFor(tripDays, take);
-    return {
-      id: cat.id,
-      title: cat.title,
-      titleEn: cat.titleEn,
-      items: cat.pool.slice(0, take).map((c) => ({
-        id: c.id,
-        label: c.label,
-        labelEn: c.labelEn,
-        reuse,
-      })),
-    };
-  });
-
-  // Core pieces = the most-reused items across all categories (the ones the
-  // whole plan leans on). Cards in the sketch show up to four.
-  const corePieces: CorePiece[] = categories
-    .flatMap((cat) => cat.items)
-    .sort((a, b) => b.reuse - a.reuse)
-    .slice(0, 4)
-    .map((item) => ({
-      id: item.id,
-      label: item.label,
-      labelEn: item.labelEn,
-      reuse: item.reuse,
-    }));
-
-  const totalItems = categories.reduce((n, c) => n + c.items.length, 0);
-  const summary =
-    b <= 33
-      ? `精简模式:${totalItems} 件单品覆盖 ${tripDays} 天，高复用、行李最轻。`
-      : b >= 67
-      ? `造型模式:${totalItems} 件单品，每天都有新搭配、复用较低。`
-      : `均衡模式:${totalItems} 件单品，兼顾变化与行李空间。`;
-  const summaryEn =
-    b <= 33
-      ? `Lean mode: ${totalItems} pieces for ${tripDays} days — high reuse, lightest bag.`
-      : b >= 67
-      ? `Style mode: ${totalItems} pieces, a fresh look every day with lower reuse.`
-      : `Balanced mode: ${totalItems} pieces balancing variety and luggage space.`;
-
-  return {
-    balance: b,
-    tripDays,
-    summary,
-    summaryEn,
-    categories,
-    essentials: ESSENTIALS,
-    corePieces,
-  };
-}
 
 /**
  * 不来自衣橱的分类。充电宝、转换插头这类东西衣柜里根本不会有,空的
@@ -204,15 +60,37 @@ export function buildPackingPlan(balance: number, tripDays = 4): PackingPlan {
  */
 const GEAR_CATEGORIES = new Set(["equipment"]);
 
+/** The one-line count shown above the list always matches what is listed. */
+function countSummary(b: number, pieces: number, tripDays: number) {
+  if (b <= 33) {
+    return {
+      zh: `精简模式：${pieces} 件衣物覆盖 ${tripDays} 天，高复用、行李最轻。`,
+      en: `Lean mode: ${pieces} pieces of clothing for ${tripDays} days — high reuse, lightest bag.`,
+    };
+  }
+  if (b >= 67) {
+    return {
+      zh: `造型模式：${pieces} 件衣物，${tripDays} 天里搭配变化最多。`,
+      en: `Style mode: ${pieces} pieces of clothing with the most variety across ${tripDays} days.`,
+    };
+  }
+  return {
+    zh: `均衡模式：${pieces} 件衣物覆盖 ${tripDays} 天，兼顾变化与行李空间。`,
+    en: `Balanced mode: ${pieces} pieces of clothing for ${tripDays} days, balancing variety and space.`,
+  };
+}
+
 /**
- * Apply the existing variety/light slider to the agent's prioritized list.
- * The agent makes the semantic recommendation; this deterministic server rule
- * only reveals support/optional pieces as the user asks for more variety.
+ * Apply the variety/light slider to the agent's prioritized list. Rows worn in
+ * a daily outfit are stored as "core" (see normalizeGeneratedTrip), so the
+ * leanest setting can never drop a piece the itinerary still dresses you in;
+ * only support/optional extras appear as the user asks for more variety.
  */
 export function buildGeneratedPackingPlan(
   source: StoredGeneratedPacking,
   balance: number,
-  tripDays: number
+  tripDays: number,
+  checkedIds: Iterable<string> = []
 ): PackingPlan {
   const b = clamp(Math.round(balance), 0, 100);
   const include = (priority: "core" | "support" | "optional") =>
@@ -238,14 +116,39 @@ export function buildGeneratedPackingPlan(
     .sort((a, b) => b.reuse - a.reuse)
     .slice(0, 4)
     .map(({ id, label, labelEn, reuse }) => ({ id, label, labelEn, reuse }));
+  const pieces = categories
+    .filter((category) => !GEAR_CATEGORIES.has(category.id))
+    .reduce((n, category) => n + category.items.length, 0);
+  const counted = countSummary(b, pieces, tripDays);
+  // Progress counts only what is on screen: a ticked item hidden by the
+  // slider, or one left over from an earlier plan, is not "packed".
+  const ticked = new Set(checkedIds);
+  const visibleIds = [
+    ...categories.flatMap((category) => category.items.map((item) => item.id)),
+    ...source.essentials.map((item) => item.id),
+  ];
+  const checked = visibleIds.filter((id) => ticked.has(id));
+  const join = (lead: string, advice: string) =>
+    advice.trim() ? `${lead} ${advice.trim()}` : lead;
 
   return {
     balance: b,
     tripDays,
-    summary: source.summary,
-    summaryEn: source.summaryEn,
+    summary: join(counted.zh, source.summary),
+    summaryEn: join(counted.en, source.summaryEn),
     categories,
     essentials: source.essentials,
     corePieces,
+    checked,
+    packedCount: checked.length,
+    totalCount: visibleIds.length,
   };
+}
+
+/** Every id a checklist tick may refer to, including slider-hidden rows. */
+export function packingItemIds(source: StoredGeneratedPacking): Set<string> {
+  return new Set([
+    ...source.categories.flatMap((category) => category.items.map((item) => item.id)),
+    ...source.essentials.map((item) => item.id),
+  ]);
 }

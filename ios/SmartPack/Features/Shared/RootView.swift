@@ -28,6 +28,25 @@ struct RootView: View {
         .environment(\.lang, language.lang)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.42), value: phaseKey)
         .task { await boot() }
+        .confirmationDialog(
+            app.pendingDeletion.map { Strings.confirmDelete(language.lang, title: $0.title) } ?? "",
+            isPresented: Binding(
+                get: { app.pendingDeletion != nil },
+                set: { if !$0 { app.pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(Strings.wardrobeDelete(language.lang), role: .destructive) {
+                Task { await app.confirmPendingDeletion() }
+            }
+            Button(Strings.cancelDelete(language.lang), role: .cancel) {}
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: APIClient.sessionExpired)
+                .receive(on: RunLoop.main)
+        ) { _ in
+            app.sessionExpired()
+        }
     }
 
     @ViewBuilder
@@ -37,6 +56,8 @@ struct RootView: View {
             // Nothing flashes before the token check resolves — the web client
             // returns null here for the same reason.
             Theme.bg.ignoresSafeArea()
+        case .unreachable:
+            UnreachableView { await app.restoreSession() }
         case .landing:
             LandingView()
         case .login:
@@ -53,6 +74,7 @@ struct RootView: View {
     private var phaseKey: String {
         switch app.phase {
         case .booting: return "booting"
+        case .unreachable: return "unreachable"
         case .landing: return "landing"
         case .login: return "login"
         case .register: return "register"

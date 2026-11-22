@@ -107,6 +107,7 @@ test("trip forecast falls back without misreporting a 429 as a date error", asyn
   assert.equal(forecast.days.length, 2);
   assert.deepEqual(forecast.days[0], {
     date: "2026-08-26",
+    basis: "forecast",
     condition: "Showers",
     minTempC: 25,
     maxTempC: 31,
@@ -114,4 +115,25 @@ test("trip forecast falls back without misreporting a 429 as a date error", asyn
     uvIndex: 6.2,
     maxWindKph: 18,
   });
+});
+
+test("backup forecast groups hours by the destination's day, not UTC's", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.includes("open-meteo.com")) return new Response("", { status: 503 });
+    // 20:00 UTC on the 26th is 05:00 on the 27th in Tokyo.
+    return metResponse([
+      {
+        time: "2026-08-26T20:00:00Z",
+        data: {
+          instant: { details: { air_temperature: 27, wind_speed: 2 } },
+          next_1_hours: { summary: { symbol_code: "clearsky_day" }, details: { precipitation_amount: 0 } },
+        },
+      },
+    ]);
+  });
+  t.mock.method(console, "warn", () => {});
+  const forecast = await loadDestinationForecast(35.68, 139.69, "2026-08-27", "2026-08-27");
+  assert.equal(forecast.available, true);
+  assert.deepEqual(forecast.days.map((d) => d.date), ["2026-08-27"]);
 });

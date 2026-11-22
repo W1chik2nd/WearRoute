@@ -53,6 +53,23 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+/** An API failure; `status` is null when the server could not be reached. */
+export class ApiError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/**
+ * Fired when a request sent with a session token comes back 401: the server
+ * no longer knows the session, so the app returns to sign-in once instead of
+ * every page failing on its own.
+ */
+export const SESSION_EXPIRED_EVENT = "wearroute:session-expired";
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
@@ -71,13 +88,18 @@ async function request<T>(
     res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   } catch (err) {
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    throw new Error(
-      `请求失败：无法连接 WearRoute 服务。${detail}（请求：${path}）。请确认后端已启动。`
+    throw new ApiError(
+      `请求失败：无法连接 WearRoute 服务。${detail}（请求：${path}）。请确认后端已启动。`,
+      null
     );
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(body.error ?? `Request failed (${res.status})`);
+    if (res.status === 401 && token) {
+      setToken(null);
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    }
+    throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status);
   }
   return body as T;
 }
@@ -157,13 +179,6 @@ export function deleteWardrobeItem(id: string): Promise<{ ok: boolean }> {
     `/api/wardrobe/items/${encodeURIComponent(id)}`,
     { method: "DELETE" }
   );
-}
-
-/** 照片地址。带 token 查询参数,因为 <img> 标签发不出 Authorization 头。 */
-export function wardrobePhotoUrl(id: string): string {
-  return `${API_BASE_URL}/api/wardrobe/photo/${encodeURIComponent(id)}?token=${encodeURIComponent(
-    getToken() ?? ""
-  )}`;
 }
 
 // ---- 扫码上传:手机拍照 → 电脑接收 ----
@@ -267,6 +282,19 @@ export function getPackingPlan(
   );
 }
 
+/** Tick or untick one checklist item; ticks are stored per trip on the server. */
+export function setPackingCheck(
+  tripPlanId: string,
+  itemId: string,
+  checked: boolean,
+  balance: number
+): Promise<{ plan: PackingPlan }> {
+  return request<{ plan: PackingPlan }>("/api/packing/checks", {
+    method: "PUT",
+    body: JSON.stringify({ tripPlanId, itemId, checked, balance }),
+  });
+}
+
 // ---- 行程计划(目的地 + 日期区间)----
 // 地点搜索走后端代理 /api/places(AGENTS.md §3):第三方地理编码服务只在
 // 服务端对接,未来 iOS 端调同一个接口。
@@ -316,11 +344,12 @@ export function deleteTripPlan(id: string): Promise<{ ok: true }> {
 
 // ---- 今日 / 行程穿搭 ----
 
+/** `today` is the user's local calendar day (YYYY-MM-DD), not UTC. */
 export function getOutfitPlan(
-  tripPlanId?: string
+  tripPlanId: string | undefined,
+  today: string
 ): Promise<{ plan: OutfitPlan }> {
-  const query = tripPlanId
-    ? `?tripPlanId=${encodeURIComponent(tripPlanId)}`
-    : "";
-  return request<{ plan: OutfitPlan }>(`/api/outfit-plan${query}`);
+  const params = new URLSearchParams({ today });
+  if (tripPlanId) params.set("tripPlanId", tripPlanId);
+  return request<{ plan: OutfitPlan }>(`/api/outfit-plan?${params}`);
 }

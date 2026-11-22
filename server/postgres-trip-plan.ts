@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NewTripPlan, TripPlan, TripPlanStore } from "./trip-plan.ts";
+import { insertGenerated } from "./postgres-itinerary.ts";
+import { insertGeneratedPacking } from "./postgres-packing-store.ts";
 import {
   inTransaction,
   row,
@@ -47,14 +49,13 @@ function toPlan(value: TripPlanRow): TripPlan {
 export async function createPostgresTripPlanStore(
   pool: PostgresPool
 ): Promise<TripPlanStore> {
+  // Interrupted jobs are not failed on boot: during a rolling deploy another
+  // instance may still be running them. Their lease lapses instead and the
+  // job runner (trip-jobs.ts) takes them over.
   await pool.query(`
     UPDATE trip_plans
        SET generation_status = 'completed'
      WHERE itinerary_id IS NOT NULL AND generation_status = 'pending';
-    UPDATE trip_plans
-       SET generation_status = 'failed',
-           generation_error = 'Generation was interrupted. Please try again.'
-     WHERE generation_status = 'processing';
   `);
 
   return {
@@ -103,32 +104,102 @@ export async function createPostgresTripPlanStore(
       ).map(toPlan);
     },
 
-    async markGenerating(userId, planId) {
+    async startGeneration(userId, planId, lease) {
       await pool.query(
         `UPDATE trip_plans
-            SET generation_status = 'processing', generation_error = NULL
-          WHERE id = $1 AND user_id = $2`,
+            SET generation_status = 'processing', generation_error = NULL,
+                generation_token = $1, generation_lease_until = $2,
+                generation_attempts = 1
+          WHERE id = $3 AND user_id = $4`,
+        [lease.token, lease.leaseMs, planId, userId]
+      );
+    },
+
+    async renewGeneration(planId, lease) {
+      const result = await pool.query(
+        `UPDATE trip_plans SET generation_lease_until = $1
+          WHERE id = $2 AND generation_status = 'processing'
+            AND generation_token = $3`,
+        [lease.leaseMs, planId, lease.token]
+      );
+      return (result.rowCount ?? 0) > 0;
+    },
+
+    async expiredGenerations(now) {
+      return (
+        await rows<{ id: string; user_id: string; generation_attempts: number }>(
+          pool,
+          `SELECT id, user_id, generation_attempts FROM trip_plans
+            WHERE generation_status = 'processing'
+              AND (generation_lease_until IS NULL OR generation_lease_until < $1)`,
+          [now]
+        )
+      ).map((value) => ({
+        planId: value.id,
+        userId: value.user_id,
+        attempts: value.generation_attempts,
+      }));
+    },
+
+    async takeOverGeneration(planId, now, lease) {
+      const result = await pool.query(
+        `UPDATE trip_plans
+            SET generation_token = $1, generation_lease_until = $2,
+                generation_attempts = generation_attempts + 1
+          WHERE id = $3 AND generation_status = 'processing'
+            AND (generation_lease_until IS NULL OR generation_lease_until < $4)`,
+        [lease.token, lease.leaseMs, planId, now]
+      );
+      return (result.rowCount ?? 0) > 0;
+    },
+
+    async markFailed(userId, planId, error, token) {
+      await pool.query(
+        `UPDATE trip_plans
+            SET generation_status = 'failed', generation_error = $1,
+                generation_token = NULL, generation_lease_until = NULL
+          WHERE id = $2 AND user_id = $3
+            AND ($4::text IS NULL OR generation_token = $4::text)`,
+        [error, planId, userId, token ?? null]
+      );
+    },
+
+    async completeGeneration({ userId, planId, token, scenario, tripDays, generated }) {
+      return inTransaction(pool, async (client) => {
+        const owned = await row(
+          client,
+          `SELECT 1 FROM trip_plans
+            WHERE id = $1 AND user_id = $2 AND generation_status = 'processing'
+              AND generation_token = $3
+            FOR UPDATE`,
+          [planId, userId, token]
+        );
+        if (!owned) return false;
+        const itineraryId = await insertGenerated(client, userId, planId, scenario, generated);
+        await insertGeneratedPacking(client, userId, planId, tripDays, generated.packing);
+        await client.query(
+          `UPDATE trip_plans
+              SET itinerary_id = $1, generation_status = 'completed',
+                  generation_error = NULL, generation_token = NULL,
+                  generation_lease_until = NULL, weather_snapshot = $2
+            WHERE id = $3`,
+          [
+            itineraryId,
+            generated.weatherSnapshot ? JSON.stringify(generated.weatherSnapshot) : null,
+            planId,
+          ]
+        );
+        return true;
+      });
+    },
+
+    async weatherSnapshot(userId, planId) {
+      const value = await row<{ weather_snapshot: string | null }>(
+        pool,
+        `SELECT weather_snapshot FROM trip_plans WHERE id = $1 AND user_id = $2`,
         [planId, userId]
       );
-    },
-
-    async markFailed(userId, planId, error) {
-      await pool.query(
-        `UPDATE trip_plans
-            SET generation_status = 'failed', generation_error = $1
-          WHERE id = $2 AND user_id = $3`,
-        [error, planId, userId]
-      );
-    },
-
-    async attachItinerary(userId, planId, itineraryId) {
-      await pool.query(
-        `UPDATE trip_plans
-            SET itinerary_id = $1, generation_status = 'completed',
-                generation_error = NULL
-          WHERE id = $2 AND user_id = $3`,
-        [itineraryId, planId, userId]
-      );
+      return value?.weather_snapshot ? JSON.parse(value.weather_snapshot) : null;
     },
 
     async remove(userId, planId) {

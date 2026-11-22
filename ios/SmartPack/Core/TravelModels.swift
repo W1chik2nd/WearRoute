@@ -72,12 +72,26 @@ struct ForecastDay: Codable, Identifiable, Hashable {
     var id: String { date }
 
     let date: String
+    /// "forecast" or "typical" (an average for these dates over recent years).
+    var basis: String?
     let condition: String
     let minTempC: Double
     let maxTempC: Double
     let precipitationProbability: Double
-    let uvIndex: Double
+    /// Nil for typical days: the historical archive has no UV index.
+    let uvIndex: Double?
     let maxWindKph: Double
+
+    var isTypical: Bool { basis == "typical" }
+}
+
+/// A day whose live forecast moved enough since the outfits were planned.
+struct WeatherChange: Codable, Hashable {
+    let date: String
+    /// rain / dry: the rain chance crossed 50%. warmer / colder: high moved 5 °C+.
+    let kind: String
+    let before: Double
+    let after: Double
 }
 
 struct TripForecast: Codable, Hashable {
@@ -99,6 +113,7 @@ struct TripWeatherSummary: Codable, Hashable {
 struct TripWeatherResponse: Codable, Hashable {
     let trip: TripWeatherSummary
     let forecast: TripForecast
+    var changes: [WeatherChange]?
 }
 
 // MARK: - Generated itinerary
@@ -255,10 +270,12 @@ struct PackingPlan: Codable, Equatable {
     let categories: [PackingCategory]
     let essentials: [EssentialItem]
     let corePieces: [CorePiece]
+    /// Ticked ids among the shown items; stored per trip on the server.
+    let checked: [String]
+    let packedCount: Int
+    let totalCount: Int
 
     func summaryText(_ lang: Lang) -> String { lang == .zh ? summary : (summaryEn.isEmpty ? summary : summaryEn) }
-
-    var totalItems: Int { categories.reduce(0) { $0 + $1.items.count } }
 }
 
 struct PackingPlanResponse: Codable {

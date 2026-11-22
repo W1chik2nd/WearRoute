@@ -1,27 +1,32 @@
-import { randomUUID } from "node:crypto";
 import type { GeneratedPacking } from "./trip-agent-types.ts";
 import type { StoredGeneratedPacking } from "./packing.ts";
-import type {
-  GeneratedPackingRecord,
-  PackingPlanStore,
+import {
+  storedPacking,
+  type GeneratedPackingRecord,
+  type PackingPlanStore,
 } from "./packing-store.ts";
-import { row, type PostgresPool } from "./postgres.ts";
+import { row, rows, type PostgresPool, type PostgresQueryable } from "./postgres.ts";
 
-function stored(packing: GeneratedPacking): StoredGeneratedPacking {
-  return {
-    summary: packing.summary,
-    summaryEn: packing.summaryEn,
-    categories: packing.categories.map((category) => ({
-      id: category.id,
-      title: category.title,
-      titleEn: category.titleEn,
-      items: category.items.map((item) => ({ id: randomUUID(), ...item })),
-    })),
-    essentials: packing.essentials.map((item) => ({
-      id: randomUUID(),
-      ...item,
-    })),
-  };
+/** Insert or replace one generated plan; used inside the completion transaction. */
+export async function insertGeneratedPacking(
+  db: PostgresQueryable,
+  userId: string,
+  tripPlanId: string,
+  tripDays: number,
+  packing: GeneratedPacking
+): Promise<GeneratedPackingRecord> {
+  const plan = storedPacking(packing);
+  await db.query(
+    `INSERT INTO generated_packing_plans
+       (trip_plan_id, user_id, trip_days, plan_json)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (trip_plan_id) DO UPDATE
+       SET trip_days = EXCLUDED.trip_days,
+           plan_json = EXCLUDED.plan_json,
+           created_at = NOW()`,
+    [tripPlanId, userId, tripDays, JSON.stringify(plan)]
+  );
+  return { tripPlanId, tripDays, packing: plan };
 }
 
 function toRecord(value: {
@@ -40,19 +45,8 @@ export function createPostgresPackingPlanStore(
   pool: PostgresPool
 ): PackingPlanStore {
   return {
-    async save(userId, tripPlanId, tripDays, packing) {
-      const plan = stored(packing);
-      await pool.query(
-        `INSERT INTO generated_packing_plans
-           (trip_plan_id, user_id, trip_days, plan_json)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (trip_plan_id) DO UPDATE
-           SET trip_days = EXCLUDED.trip_days,
-               plan_json = EXCLUDED.plan_json,
-               created_at = NOW()`,
-        [tripPlanId, userId, tripDays, JSON.stringify(plan)]
-      );
-      return { tripPlanId, tripDays, packing: plan };
+    save(userId, tripPlanId, tripDays, packing) {
+      return insertGeneratedPacking(pool, userId, tripPlanId, tripDays, packing);
     },
 
     async get(userId, tripPlanId) {
@@ -89,6 +83,29 @@ export function createPostgresPackingPlanStore(
         values
       );
       return value ? toRecord(value) : null;
+    },
+
+    async checks(userId, tripPlanId) {
+      return (
+        await rows<{ item_id: string }>(
+          pool,
+          `SELECT item_id FROM packing_checks WHERE user_id = $1 AND trip_plan_id = $2`,
+          [userId, tripPlanId]
+        )
+      ).map((value) => value.item_id);
+    },
+
+    async setChecks(userId, tripPlanId, itemIds, checked) {
+      if (itemIds.length === 0) return;
+      await pool.query(
+        checked
+          ? `INSERT INTO packing_checks (trip_plan_id, user_id, item_id)
+             SELECT $1, $2, UNNEST($3::text[])
+             ON CONFLICT DO NOTHING`
+          : `DELETE FROM packing_checks
+              WHERE trip_plan_id = $1 AND user_id = $2 AND item_id = ANY($3::text[])`,
+        [tripPlanId, userId, itemIds]
+      );
     },
   };
 }

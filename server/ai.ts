@@ -259,6 +259,9 @@ export async function chatCompletion(
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       temperature: 0.7,
     }),
+    // Chat and translation sit in front of a waiting user; without a limit a
+    // stalled provider held the request open indefinitely.
+    signal: AbortSignal.timeout(60_000),
   });
 
   if (!res.ok) {

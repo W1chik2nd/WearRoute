@@ -40,4 +40,9 @@ export type PackingPlan = {
   categories: PackingCategory[];
   essentials: EssentialItem[];
   corePieces: CorePiece[];
+  /** Ticked ids among the items currently shown (stored per trip on the server). */
+  checked: string[];
+  packedCount: number;
+  /** Shown packing rows plus essentials. */
+  totalCount: number;
 };

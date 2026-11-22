@@ -1,4 +1,5 @@
 import pg, { type PoolClient, type PoolConfig } from "pg";
+import { SESSION_TTL_MS } from "./account-routes.ts";
 
 const { Pool } = pg;
 
@@ -44,6 +45,12 @@ export async function createPostgresPool(
 ): Promise<PostgresPool> {
   const schema = process.env.DATABASE_SCHEMA ?? "wearroute";
   const pool = new Pool(postgresPoolConfig(connectionString, schema));
+  // Neon closes idle connections. pg reports that as an "error" event on the
+  // pool, and an EventEmitter error with no listener terminates the process.
+  // The pool discards the broken client and reconnects on the next query.
+  pool.on("error", (error) => {
+    console.error(`[postgres] idle client error: ${error.message}`);
+  });
   await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
   await initializePostgresSchema(pool);
   return pool;
@@ -205,6 +212,13 @@ async function initializePostgresSchema(pool: PostgresPool): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_generated_packing_user
       ON generated_packing_plans(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS packing_checks (
+      trip_plan_id TEXT NOT NULL REFERENCES trip_plans(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      item_id TEXT NOT NULL,
+      PRIMARY KEY (trip_plan_id, item_id)
+    );
   `);
 
   await pool.query(`
@@ -220,12 +234,19 @@ async function initializePostgresSchema(pool: PostgresPool): Promise<void> {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS travel_habits TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS travel_habits_other TEXT;
     ALTER TABLE wardrobe_items ADD COLUMN IF NOT EXISTS subtype TEXT NOT NULL DEFAULT '';
+    ALTER TABLE wardrobe_items ADD COLUMN IF NOT EXISTS title_en TEXT NOT NULL DEFAULT '';
     ALTER TABLE wardrobe_items ADD COLUMN IF NOT EXISTS photo_data BYTEA;
     ALTER TABLE wardrobe_items ADD COLUMN IF NOT EXISTS photo_content_type TEXT;
     ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
     ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS itinerary_id TEXT;
     ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS generation_status TEXT NOT NULL DEFAULT 'pending';
     ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS generation_error TEXT;
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at BIGINT;
+    ALTER TABLE trip_stops ADD COLUMN IF NOT EXISTS photo_missing_at BIGINT;
+    ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS weather_snapshot TEXT;
+    ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS generation_token TEXT;
+    ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS generation_lease_until BIGINT;
+    ALTER TABLE trip_plans ADD COLUMN IF NOT EXISTS generation_attempts INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE trips ADD COLUMN IF NOT EXISTS source_plan_id TEXT;
     ALTER TABLE trip_days ADD COLUMN IF NOT EXISTS weather_summary TEXT NOT NULL DEFAULT '';
     ALTER TABLE trip_days ADD COLUMN IF NOT EXISTS weather_summary_en TEXT NOT NULL DEFAULT '';
@@ -234,4 +255,8 @@ async function initializePostgresSchema(pool: PostgresPool): Promise<void> {
     ALTER TABLE trip_days ADD COLUMN IF NOT EXISTS outfit_json TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE trip_days ADD COLUMN IF NOT EXISTS equipment_json TEXT NOT NULL DEFAULT '[]';
   `);
+  // Sessions used to live forever; existing ones get a normal lifetime.
+  await pool.query(`UPDATE sessions SET expires_at = $1 WHERE expires_at IS NULL`, [
+    Date.now() + SESSION_TTL_MS,
+  ]);
 }

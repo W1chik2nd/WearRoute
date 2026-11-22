@@ -311,6 +311,7 @@ test("one agent run synchronizes trip, itinerary, outfits, equipment, and packin
     ).json();
     assert.match(travelPacking.plan.summary, /京都/);
     assert.match(datePacking.plan.summary, /上海/);
+
     assert.equal(
       (await request("/api/packing?balance=50&tripPlanId=missing")).status,
       404

@@ -1,10 +1,12 @@
 // Structured actions for the WearRoute assistant. Model output is untrusted:
 // only this allow-list can reach database-backed operations.
-import { isIsoDate, tripDayCount, MAX_TRIP_DAYS } from "./trip-input.ts";
-import type { TripPlanStore } from "./trip-plan.ts";
+import { parseTripInput } from "./trip-input.ts";
+import type { NewTripPlan, TripPlanStore } from "./trip-plan.ts";
 import type { WardrobeStore, NewItem, ItemPatch } from "./wardrobe.ts";
 import { validateProfile, type ProfileValues } from "./profile.ts";
 import type { AsyncValue } from "./async-value.ts";
+import type { PackingPlanStore } from "./packing-store.ts";
+import { packingItemIds } from "./packing.ts";
 
 export const ASSISTANT_PAGES = [
   "home", "trips", "tripSetup", "itinerary", "wardrobe", "profile", "packing",
@@ -20,14 +22,13 @@ export type AssistantAction =
   | { type: "packingChecklist"; checked?: string[]; unchecked?: string[]; balance?: number }
   | {
       type: "createTripPlan";
+      /** Coordinates come from geocoding the name, never from the model. */
       plan: {
         scenario: string;
         placeName: string;
-        placeDetail?: string;
-        lat: number;
-        lon: number;
         startDate: string;
         endDate: string;
+        notes?: string;
       };
     };
 
@@ -36,7 +37,9 @@ export type ClientAssistantAction =
   | { type: "profileUpdated"; user: unknown }
   | { type: "wardrobeChanged" }
   | { type: "tripCreated" }
-  | { type: "packingChanged"; balance?: number; checked?: string[]; unchecked?: string[] };
+  | { type: "packingChanged"; tripPlanId: string; balance?: number }
+  /** Deleting is never done on the model's word alone; the user confirms. */
+  | { type: "confirmDeleteWardrobeItem"; id: string; title: string };
 
 export type AssistantEnvelope = { reply: string; actions: AssistantAction[] };
 export type AssistantActionContext = {
@@ -44,6 +47,13 @@ export type AssistantActionContext = {
   scenarioIds: ReadonlySet<string>;
   wardrobe: WardrobeStore;
   tripPlans: TripPlanStore;
+  packingPlans: PackingPlanStore;
+  /** Resolve a place name to coordinates (Nominatim); null when unknown. */
+  geocode: (
+    placeName: string
+  ) => Promise<{ placeName: string; placeDetail: string; lat: number; lon: number } | null>;
+  /** Save the trip and queue the same Agent generation the form uses. */
+  startTripGeneration: (plan: NewTripPlan) => Promise<unknown>;
   updateProfile: (values: ProfileValues) => AsyncValue<unknown>;
   currentProfile: () => AsyncValue<Record<string, unknown>>;
 };
@@ -69,6 +79,7 @@ function wardrobeItem(raw: Record<string, unknown>): NewItem | null {
     ? Math.min(raw.count, 99) : undefined;
   return {
     title,
+    ...(typeof raw.titleEn === "string" ? { titleEn: clean(raw.titleEn, 120) } : {}),
     category,
     ...(typeof raw.subtype === "string" ? { subtype: clean(raw.subtype, 80) } : {}),
     ...(count ? { count } : {}),
@@ -110,7 +121,12 @@ function parseAction(raw: unknown): AssistantAction | null {
     const raw = value.patch as Record<string, unknown>;
     const patch: ItemPatch = {};
     if (typeof raw.title === "string") patch.title = clean(raw.title, 120);
+    if (typeof raw.titleEn === "string") patch.titleEn = clean(raw.titleEn, 120);
     if (typeof raw.category === "string") patch.category = clean(raw.category, 80);
+    // A misrecognised colour is the most common correction users ask for.
+    if (strings(raw.colors)) patch.colors = strings(raw.colors);
+    if (strings(raw.seasons)) patch.seasons = strings(raw.seasons);
+    if (strings(raw.styleTags)) patch.styleTags = strings(raw.styleTags);
     if (typeof raw.subtype === "string") patch.subtype = clean(raw.subtype, 80);
     if (typeof raw.count === "number" && Number.isInteger(raw.count) && raw.count > 0) patch.count = Math.min(raw.count, 99);
     if (typeof raw.fit === "string") patch.fit = clean(raw.fit, 80);
@@ -125,12 +141,11 @@ function parseAction(raw: unknown): AssistantAction | null {
   if (value.type !== "createTripPlan" || !value.plan || typeof value.plan !== "object") return null;
   const plan = value.plan as Record<string, unknown>;
   if (typeof plan.scenario !== "string" || typeof plan.placeName !== "string" ||
-      typeof plan.lat !== "number" || typeof plan.lon !== "number" ||
       typeof plan.startDate !== "string" || typeof plan.endDate !== "string") return null;
   return { type: "createTripPlan", plan: {
     scenario: plan.scenario, placeName: clean(plan.placeName, 200),
-    ...(typeof plan.placeDetail === "string" ? { placeDetail: clean(plan.placeDetail, 300) } : {}),
-    lat: plan.lat, lon: plan.lon, startDate: plan.startDate, endDate: plan.endDate,
+    startDate: plan.startDate, endDate: plan.endDate,
+    ...(typeof plan.notes === "string" ? { notes: clean(plan.notes, 1200) } : {}),
   }};
 }
 
@@ -169,8 +184,20 @@ export async function executeAssistantActions(
       continue;
     }
     if (action.type === "packingChecklist") {
-      const { type: _type, ...packing } = action;
-      completed.push({ type: "packingChanged", ...packing });
+      // Ticks are stored per trip on the server, so the assistant changes the
+      // same checklist the web and iOS clients show (the latest generated one,
+      // whose item ids are in the prompt context).
+      const latest = await ctx.packingPlans.latest(ctx.userId);
+      if (!latest) { errors.push("There is no packing list yet."); continue; }
+      const known = packingItemIds(latest.packing);
+      const valid = (ids?: string[]) => (ids ?? []).filter((id) => known.has(id));
+      await ctx.packingPlans.setChecks(ctx.userId, latest.tripPlanId, valid(action.checked), true);
+      await ctx.packingPlans.setChecks(ctx.userId, latest.tripPlanId, valid(action.unchecked), false);
+      completed.push({
+        type: "packingChanged",
+        tripPlanId: latest.tripPlanId,
+        ...(action.balance !== undefined ? { balance: action.balance } : {}),
+      });
       continue;
     }
     if (action.type === "updateWardrobeItem") {
@@ -179,20 +206,26 @@ export async function executeAssistantActions(
       continue;
     }
     if (action.type === "deleteWardrobeItem") {
-      if (!(await ctx.wardrobe.remove(ctx.userId, action.id))) errors.push("Wardrobe item not found.");
-      else completed.push({ type: "wardrobeChanged" });
+      // A misread request must not silently destroy data: hand the deletion
+      // to the client, which asks the user and then calls DELETE itself.
+      const item = (await ctx.wardrobe.list(ctx.userId)).find((i) => i.id === action.id);
+      if (!item) errors.push("Wardrobe item not found.");
+      else completed.push({ type: "confirmDeleteWardrobeItem", id: item.id, title: item.title });
       continue;
     }
-    const p = action.plan;
-    const coordinatesValid = Number.isFinite(p.lat) && Number.isFinite(p.lon) &&
-      p.lat >= -90 && p.lat <= 90 && p.lon >= -180 && p.lon <= 180;
-    if (!ctx.scenarioIds.has(p.scenario) || !p.placeName || !coordinatesValid ||
-        !isIsoDate(p.startDate) || !isIsoDate(p.endDate) || p.endDate < p.startDate ||
-        tripDayCount(p.startDate, p.endDate) > MAX_TRIP_DAYS) {
-      errors.push("The trip details are incomplete or invalid.");
+    // Same validation and the same generation job as the trip form. Model
+    // coordinates were often approximate, so the place is geocoded instead.
+    const place = await ctx.geocode(action.plan.placeName);
+    if (!place) {
+      errors.push(`Could not find "${action.plan.placeName}" on the map.`);
       continue;
     }
-    await ctx.tripPlans.save(ctx.userId, { ...p, placeDetail: p.placeDetail ?? "" });
+    const parsed = parseTripInput({ ...action.plan, ...place }, ctx.scenarioIds);
+    if (parsed.ok === false) {
+      errors.push(parsed.error);
+      continue;
+    }
+    await ctx.startTripGeneration(parsed.plan);
     completed.push({ type: "tripCreated" }, { type: "navigate", page: "home" });
   }
   return { actions: completed, errors };

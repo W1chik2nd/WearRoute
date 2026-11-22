@@ -68,3 +68,20 @@ export const WEATHER_CONDITION_LABELS: Record<
   "Snow showers": { en: "Snow showers", zh: "阵雪" },
   Thunderstorm: { en: "Thunderstorm", zh: "雷暴" },
 };
+
+/** One forecast change since planning, e.g. "Sep 3: rain chance 10% → 80%". */
+export function weatherChangeMessage(
+  lang: Lang,
+  dateLabel: string,
+  change: { kind: "rain" | "dry" | "warmer" | "colder"; before: number; after: number }
+): string {
+  const { kind, before, after } = change;
+  if (kind === "rain" || kind === "dry") {
+    return lang === "zh"
+      ? `${dateLabel}：降雨概率 ${before}% → ${after}%${kind === "rain" ? "，记得带伞" : ""}`
+      : `${dateLabel}: rain chance ${before}% → ${after}%${kind === "rain" ? " — pack an umbrella" : ""}`;
+  }
+  return lang === "zh"
+    ? `${dateLabel}：最高气温 ${before}°C → ${after}°C，${kind === "warmer" ? "可以穿得更轻薄" : "需要加一层"}`
+    : `${dateLabel}: high ${before}°C → ${after}°C — ${kind === "warmer" ? "dress lighter" : "add a layer"}`;
+}

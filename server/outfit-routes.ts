@@ -3,6 +3,7 @@ import type { TripPlanStore } from "./trip-plan.ts";
 import type { WardrobeStore } from "./wardrobe.ts";
 import { buildOutfitPlan } from "./outfit-plan.ts";
 import { addIsoDays } from "../shared/trip-constraints.ts";
+import { isIsoDate } from "./trip-input.ts";
 import type { AsyncValue } from "./async-value.ts";
 
 type Ctx = {
@@ -41,10 +42,13 @@ export async function handleOutfitRoutes(ctx: Ctx): Promise<boolean> {
     scene: linkedItinerary.scenario,
     outfit: day.outfit,
   }));
+  // The client sends its own calendar day; the server's UTC clock is a day
+  // behind for users east of UTC every morning.
+  const today = ctx.url.searchParams.get("today");
   const plan = buildOutfitPlan(
     latestTrip,
     await ctx.wardrobe.list(user.id),
-    new Date(),
+    isIsoDate(today) ? new Date(`${today}T00:00:00Z`) : new Date(),
     agentDays
   );
   ctx.json(ctx.res, 200, { plan });
